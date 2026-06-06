@@ -49,10 +49,10 @@ The `Video processing` tab creates slowed H.264/AAC MP4 files for dubbing
 practice. For example, `0.50x` doubles the duration while preserving audio pitch.
 Outputs are written beside the source video as `movie.slow-0.50x.mp4`.
 
-The `Material grabber` tab wraps `yt-dlp` for one-URL downloads. Paste a URL,
-choose a folder, and choose whether to download video, subtitles, or both. The
-default subtitle language field is `de,en`, which asks `yt-dlp` for German and
-English caption tracks when available. Subtitle files are converted to SRT.
+The `Material grabber` tab wraps `yt-dlp` for one-URL downloads. Paste a URL
+and click `Inspect` first. The app fetches metadata, then shows available video
+heights and exact subtitle language tracks. Choose a folder, select video,
+subtitles, or both, then download. Subtitle files are converted to SRT.
 
 ### Shareable macOS app
 

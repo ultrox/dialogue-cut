@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::{BTreeMap, BTreeSet},
     env, fs,
     io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
@@ -58,7 +59,41 @@ struct GrabOptions {
     output_dir: String,
     download_video: bool,
     download_subtitles: bool,
+    quality: String,
     subtitle_languages: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GrabProbeOptions {
+    url: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GrabQuality {
+    value: String,
+    label: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GrabSubtitleTrack {
+    language: String,
+    label: String,
+    has_manual: bool,
+    has_automatic: bool,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GrabMetadata {
+    title: String,
+    webpage_url: String,
+    extractor: String,
+    duration: Option<f64>,
+    qualities: Vec<GrabQuality>,
+    subtitles: Vec<GrabSubtitleTrack>,
 }
 
 #[derive(Clone, Serialize)]
@@ -382,6 +417,45 @@ fn run_logged_command(
         Ok(status) => Err(format!("Process exited with status {status}.")),
         Err(error) => Err(format!("Could not wait for process: {error}")),
     }
+}
+
+fn run_captured_command(
+    app: &AppHandle,
+    state: &ConversionState,
+    command: &mut Command,
+) -> Result<String, String> {
+    if state.cancel_requested.load(Ordering::SeqCst) {
+        return Err("Conversion cancelled.".into());
+    }
+
+    prepare_process(command);
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let child = command
+        .spawn()
+        .map_err(|error| format!("Could not launch process: {error}"))?;
+    set_child_pid(state, Some(child.id()))?;
+    let result = child
+        .wait_with_output()
+        .map_err(|error| format!("Could not wait for process: {error}"));
+    set_child_pid(state, None)?;
+
+    if state.cancel_requested.load(Ordering::SeqCst) {
+        return Err("Conversion cancelled.".into());
+    }
+
+    let output = result?;
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    for line in stderr.lines() {
+        emit_log(app, "stderr", line);
+    }
+    if !output.status.success() {
+        if stderr.is_empty() {
+            return Err(format!("Process exited with status {}.", output.status));
+        }
+        return Err(stderr);
+    }
+    String::from_utf8(output.stdout)
+        .map_err(|error| format!("Process output was not UTF-8: {error}"))
 }
 
 fn checksum_matches(path: &Path, expected: &str) -> bool {
@@ -763,24 +837,144 @@ fn atempo_filter(speed: f64) -> String {
 }
 
 fn subtitle_language_spec(raw: &str) -> String {
-    let languages = raw
-        .split(',')
+    raw.split(',')
         .map(str::trim)
         .filter(|language| !language.is_empty())
-        .map(|language| {
-            if language == "all" || language.contains('*') {
-                language.to_string()
-            } else {
-                format!("{language}.*")
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn format_selector_for_quality(raw: &str) -> String {
+    let quality = raw.trim();
+    if quality == "best" {
+        return "bv*+ba/b".into();
+    }
+
+    let max_height = quality.parse::<u32>().unwrap_or(1080);
+    format!("bv*[height<={max_height}]+ba/b[height<={max_height}]/b")
+}
+
+fn string_field(value: &serde_json::Value, key: &str) -> String {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_string()
+}
+
+fn collect_qualities(value: &serde_json::Value) -> Vec<GrabQuality> {
+    let mut heights = BTreeSet::new();
+    if let Some(formats) = value.get("formats").and_then(serde_json::Value::as_array) {
+        for format in formats {
+            let has_video = format
+                .get("vcodec")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|codec| codec != "none");
+            if !has_video {
+                continue;
+            }
+            if let Some(height) = format.get("height").and_then(serde_json::Value::as_u64) {
+                if (144..=4320).contains(&height) {
+                    heights.insert(height);
+                }
+            }
+        }
+    }
+
+    let mut qualities = vec![GrabQuality {
+        value: "best".into(),
+        label: "Best available".into(),
+    }];
+    qualities.extend(heights.iter().rev().map(|height| GrabQuality {
+        value: height.to_string(),
+        label: format!("{height}p or lower"),
+    }));
+    qualities
+}
+
+fn collect_subtitle_group(
+    value: &serde_json::Value,
+    key: &str,
+    label: &str,
+    tracks: &mut BTreeMap<String, BTreeSet<String>>,
+) {
+    let Some(group) = value.get(key).and_then(serde_json::Value::as_object) else {
+        return;
+    };
+    for language in group.keys() {
+        if language == "live_chat" || language.starts_with("live_chat") {
+            continue;
+        }
+        tracks
+            .entry(language.to_string())
+            .or_default()
+            .insert(label.into());
+    }
+}
+
+fn collect_subtitles(value: &serde_json::Value) -> Vec<GrabSubtitleTrack> {
+    let mut tracks = BTreeMap::new();
+    collect_subtitle_group(value, "subtitles", "manual", &mut tracks);
+    collect_subtitle_group(value, "automatic_captions", "auto", &mut tracks);
+
+    let mut subtitles = tracks
+        .into_iter()
+        .map(|(language, sources)| {
+            let has_manual = sources.contains("manual");
+            let has_automatic = sources.contains("auto");
+            let source_label = match (has_manual, has_automatic) {
+                (true, true) => "manual + auto",
+                (true, false) => "manual",
+                (false, true) => "auto",
+                (false, false) => "unknown",
+            };
+            GrabSubtitleTrack {
+                label: format!("{language} ({source_label})"),
+                language,
+                has_manual,
+                has_automatic,
             }
         })
         .collect::<Vec<_>>();
 
-    if languages.is_empty() {
-        "de.*,en.*".into()
-    } else {
-        languages.join(",")
-    }
+    subtitles.sort_by_key(|track| {
+        let priority = match track.language.as_str() {
+            "de" => 0,
+            "en" => 1,
+            _ => 2,
+        };
+        (priority, track.language.clone())
+    });
+    subtitles
+}
+
+fn parse_grab_metadata(stdout: &str) -> Result<GrabMetadata, String> {
+    let value: serde_json::Value = serde_json::from_str(stdout)
+        .map_err(|error| format!("Could not parse yt-dlp metadata: {error}"))?;
+    let title = string_field(&value, "title");
+    Ok(GrabMetadata {
+        title: if title.is_empty() {
+            "Untitled video".into()
+        } else {
+            title
+        },
+        webpage_url: string_field(&value, "webpage_url"),
+        extractor: string_field(&value, "extractor"),
+        duration: value.get("duration").and_then(serde_json::Value::as_f64),
+        qualities: collect_qualities(&value),
+        subtitles: collect_subtitles(&value),
+    })
+}
+
+fn add_probe_args(command: &mut Command, url: &str) {
+    command
+        .args([
+            "--ignore-config",
+            "--no-playlist",
+            "--skip-download",
+            "--dump-single-json",
+        ])
+        .arg(url.trim());
 }
 
 fn add_grab_args(
@@ -791,6 +985,7 @@ fn add_grab_args(
 ) {
     command
         .args([
+            "--ignore-config",
             "--newline",
             "--no-playlist",
             "--restrict-filenames",
@@ -802,9 +997,10 @@ fn add_grab_args(
         .arg(output_template);
 
     if options.download_video {
+        let format_selector = format_selector_for_quality(&options.quality);
         command
-            .args(["-f", "bv*[height<=1080]+ba/b[height<=1080]/b"])
-            .args(["-S", "res:1080,vcodec:h264,acodec:m4a"])
+            .args(["-f", &format_selector])
+            .args(["-S", "res,vcodec:h264,acodec:m4a"])
             .args(["--merge-output-format", "mp4"])
             .args(["--remux-video", "mp4"]);
     } else {
@@ -817,10 +1013,39 @@ fn add_grab_args(
             .arg("--write-subs")
             .arg("--write-auto-subs")
             .args(["--sub-langs", &languages])
-            .args(["--convert-subs", "srt"]);
+            .args(["--sub-format", "srt/vtt/best"])
+            .args(["--convert-subs", "srt"])
+            .args(["--sleep-subtitles", "1"]);
     }
 
     command.arg(options.url.trim());
+}
+
+fn probe_grab_inner(
+    app: &AppHandle,
+    state: &ConversionState,
+    options: &GrabProbeOptions,
+) -> Result<GrabMetadata, String> {
+    let runner = download_runner(app, state)?;
+    emit_status(app, "running", "fetch", "Fetching material metadata", None);
+
+    let stdout = match runner {
+        DownloadRunner::Binary { binary, paths } => {
+            let mut command = Command::new(binary);
+            add_probe_args(&mut command, &options.url);
+            prepend_media_path(&mut command, &paths);
+            run_captured_command(app, state, &mut command)?
+        }
+        DownloadRunner::PythonModule { paths } => {
+            let mut command = Command::new(&paths.python);
+            command.args(["-m", "yt_dlp"]);
+            add_probe_args(&mut command, &options.url);
+            prepend_runtime_path(&mut command, &paths);
+            run_captured_command(app, state, &mut command)?
+        }
+    };
+
+    parse_grab_metadata(&stdout)
 }
 
 fn run_conversion(
@@ -930,13 +1155,17 @@ fn run_grab(
     let output_template = output_template_for_grab(output_dir);
     let runner = download_runner(app, state)?;
 
-    emit_status(
-        app,
-        "running",
-        "fetch",
-        "Fetching material metadata",
-        Some(output_dir),
-    );
+    let phase = if options.download_video {
+        "download"
+    } else {
+        "subtitles"
+    };
+    let message = if options.download_video {
+        "Downloading selected material"
+    } else {
+        "Saving selected subtitles"
+    };
+    emit_status(app, "running", phase, message, Some(output_dir));
 
     match runner {
         DownloadRunner::Binary { binary, paths } => {
@@ -1081,6 +1310,41 @@ fn start_slowdown(
 }
 
 #[tauri::command]
+fn probe_grab(
+    app: AppHandle,
+    state: State<'_, ConversionState>,
+    options: GrabProbeOptions,
+) -> Result<GrabMetadata, String> {
+    if state.running.swap(true, Ordering::SeqCst) {
+        return Err("A process is already running.".into());
+    }
+    state.cancel_requested.store(false, Ordering::SeqCst);
+
+    let url = options.url.trim();
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        state.running.store(false, Ordering::SeqCst);
+        return Err("Enter a valid http or https URL first.".into());
+    }
+
+    emit_status(&app, "running", "setup", "Checking downloader tools", None);
+    let result = probe_grab_inner(&app, &state, &options);
+    state.running.store(false, Ordering::SeqCst);
+    let _ = set_child_pid(&state, None);
+
+    match result {
+        Ok(metadata) => {
+            emit_status(&app, "complete", "fetch", "Metadata is ready", None);
+            Ok(metadata)
+        }
+        Err(error) => {
+            emit_log(&app, "stderr", &error);
+            emit_status(&app, "error", "error", &error, None);
+            Err(error)
+        }
+    }
+}
+
+#[tauri::command]
 fn start_grab(
     app: AppHandle,
     state: State<'_, ConversionState>,
@@ -1099,6 +1363,11 @@ fn start_grab(
     if !options.download_video && !options.download_subtitles {
         state.running.store(false, Ordering::SeqCst);
         return Err("Choose video, subtitles, or both.".into());
+    }
+    if options.download_subtitles && subtitle_language_spec(&options.subtitle_languages).is_empty()
+    {
+        state.running.store(false, Ordering::SeqCst);
+        return Err("Choose at least one subtitle track.".into());
     }
     let output_dir = PathBuf::from(options.output_dir.trim());
     if output_dir.as_os_str().is_empty() {
@@ -1167,6 +1436,7 @@ pub fn run() {
             get_runtime_status,
             start_conversion,
             start_slowdown,
+            probe_grab,
             start_grab,
             stop_conversion
         ])

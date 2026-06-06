@@ -8,8 +8,8 @@ It also includes a video-processing tab for slowing audio and video together,
 which is useful when preparing footage for dubbing practice.
 
 The desktop app also has a material-grabber tab that wraps `yt-dlp` for this
-workflow: paste one URL, choose an output folder, and download video plus
-German/English subtitles when the source exposes captions.
+workflow: paste one URL, inspect metadata, then choose video quality and exact
+subtitle tracks before downloading.
 
 Use it only with media you have the right to process.
 
@@ -53,14 +53,16 @@ movie.slow-0.50x.mp4
 
 ## Material Grabber
 
-In the desktop app, open `Material grabber`, paste a URL, choose a destination
-folder, and start the download. The app uses a fixed `yt-dlp` preset:
+In the desktop app, open `Material grabber`, paste a URL, and click `Inspect`.
+The app asks `yt-dlp` for metadata first, then shows available video heights and
+exact subtitle language tracks. Choose a destination folder and start the
+download. The app uses a fixed `yt-dlp` preset:
 
 - one URL at a time, no playlist expansion
-- best video at 1080p or lower
+- selected quality cap, or best available
 - MP4 remux when possible
-- optional manual or generated subtitles converted to SRT
-- default subtitle languages: `de,en`
+- optional selected manual or generated subtitles converted to SRT
+- exact subtitle language keys from metadata, not wildcard language matching
 
 ## Distribution
 
