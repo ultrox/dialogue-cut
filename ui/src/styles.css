@@ -132,6 +132,47 @@ small {
   background: #f7f9f7;
 }
 
+.mode-tabs {
+  padding: 14px 28px 0;
+  display: flex;
+  gap: 6px;
+  border-bottom: 1px solid #d6ded9;
+}
+
+.tab-button {
+  min-height: 38px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-bottom: 0;
+  border-radius: 6px 6px 0 0;
+  color: #5d6b66;
+  background: transparent;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.tab-button.active {
+  color: #244f46;
+  border-color: #c8d2cd;
+  background: #ffffff;
+}
+
+.tab-button svg {
+  width: 15px;
+  height: 15px;
+}
+
+.tab-panel {
+  display: none;
+}
+
+.tab-panel.active {
+  display: block;
+}
+
 .section-block {
   padding: 26px 28px;
   border-bottom: 1px solid #d6ded9;
@@ -191,6 +232,11 @@ input[type="number"] {
   padding: 0 29px 0 10px;
 }
 
+input[type="range"] {
+  width: 100%;
+  accent-color: #2f7464;
+}
+
 input:focus {
   border-color: #4b8b7a;
   box-shadow: 0 0 0 3px rgba(75, 139, 122, 0.14);
@@ -217,7 +263,8 @@ input:focus {
   gap: 12px;
 }
 
-.settings-grid label > span {
+.settings-grid label > span,
+.speed-grid label > span {
   display: block;
   margin-bottom: 6px;
   color: #53635d;
@@ -334,6 +381,51 @@ input:focus {
   border-color: #a3c9ba;
   color: #276052;
   background: #ebf7f2;
+}
+
+.speed-grid {
+  max-width: 620px;
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr);
+  align-items: end;
+  gap: 14px;
+}
+
+.range-field {
+  padding-bottom: 2px;
+}
+
+.range-labels {
+  margin-top: 2px;
+  display: flex;
+  justify-content: space-between;
+  color: #77857f;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.preset-row {
+  margin-top: 16px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.preset-button {
+  min-width: 62px;
+  min-height: 32px;
+  border: 1px solid #c6d0cb;
+  border-radius: 6px;
+  color: #315d52;
+  background: #ffffff;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.preset-button.active {
+  border-color: #2f7464;
+  color: #ffffff;
+  background: #2f7464;
 }
 
 .action-row {
@@ -471,6 +563,7 @@ input:focus {
 
 @media (max-width: 520px) {
   .app-header,
+  .mode-tabs,
   .section-block,
   .progress-panel,
   .log-panel {
@@ -478,7 +571,8 @@ input:focus {
     padding-left: 16px;
   }
 
-  .settings-grid {
+  .settings-grid,
+  .speed-grid {
     grid-template-columns: 1fr;
   }
 }

@@ -43,6 +43,13 @@ struct ConversionOptions {
     keep_sources: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SlowdownOptions {
+    video_path: String,
+    speed: f64,
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ConversionStatus {
@@ -77,13 +84,30 @@ fn local_tool_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
+fn find_on_path(name: &str) -> Option<PathBuf> {
+    let path = env::var_os("PATH")?;
+    for directory in env::split_paths(&path) {
+        let candidate = directory.join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn local_media_tools_dir() -> PathBuf {
+    find_on_path("ffmpeg")
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| PathBuf::from("/opt/homebrew/bin"))
+}
+
 fn local_processor_paths() -> ProcessorPaths {
     let tool_dir = local_tool_dir();
     ProcessorPaths {
         python: tool_dir.join(".dialogue-venv/bin/python"),
         venv_dir: tool_dir.join(".dialogue-venv"),
         script: tool_dir.join("dialogue-only.py"),
-        tools_dir: PathBuf::from("/opt/homebrew/bin"),
+        tools_dir: local_media_tools_dir(),
         hf_home: dirs_home().join(".cache/huggingface"),
     }
 }
@@ -120,8 +144,11 @@ fn private_runtime_ready(paths: &ProcessorPaths) -> bool {
     paths.python.is_file()
         && paths.script.is_file()
         && paths.venv_dir.join("bin/mlx_whisper").is_file()
-        && paths.tools_dir.join("ffmpeg").is_file()
-        && paths.tools_dir.join("ffprobe").is_file()
+        && media_tools_ready(paths)
+}
+
+fn media_tools_ready(paths: &ProcessorPaths) -> bool {
+    paths.tools_dir.join("ffmpeg").is_file() && paths.tools_dir.join("ffprobe").is_file()
 }
 
 fn local_runtime_ready(paths: &ProcessorPaths) -> bool {
@@ -171,6 +198,14 @@ fn output_path_for(video_path: &Path) -> Result<PathBuf, String> {
         .and_then(|value| value.to_str())
         .ok_or("The selected video filename is invalid.")?;
     Ok(video_path.with_file_name(format!("{stem}.dialogue-only.mp4")))
+}
+
+fn output_path_for_slowdown(video_path: &Path, speed: f64) -> Result<PathBuf, String> {
+    let stem = video_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .ok_or("The selected video filename is invalid.")?;
+    Ok(video_path.with_file_name(format!("{stem}.slow-{speed:.2}x.mp4")))
 }
 
 fn emit_status(
@@ -270,10 +305,7 @@ fn terminate_process(pid: u32) -> Result<(), String> {
 }
 
 fn set_child_pid(state: &ConversionState, pid: Option<u32>) -> Result<(), String> {
-    *state
-        .child_pid
-        .lock()
-        .map_err(|_| "Process lock failed.")? = pid;
+    *state.child_pid.lock().map_err(|_| "Process lock failed.")? = pid;
     Ok(())
 }
 
@@ -353,10 +385,20 @@ fn download_verified(
 
     let temporary = destination.with_extension("download");
     let _ = fs::remove_file(&temporary);
-    emit_log(app, "stdout", format!("Downloading {}...", destination.display()));
+    emit_log(
+        app,
+        "stdout",
+        format!("Downloading {}...", destination.display()),
+    );
     let mut command = Command::new("/usr/bin/curl");
     command
-        .args(["--location", "--fail", "--show-error", "--progress-bar", "--output"])
+        .args([
+            "--location",
+            "--fail",
+            "--show-error",
+            "--progress-bar",
+            "--output",
+        ])
         .arg(&temporary)
         .arg(url);
     run_logged_command(app, state, &mut command)?;
@@ -400,6 +442,15 @@ fn prepend_runtime_path(command: &mut Command, paths: &ProcessorPaths) {
         .env("PYTHONNOUSERSITE", "1");
 }
 
+fn prepend_media_path(command: &mut Command, paths: &ProcessorPaths) {
+    let inherited = env::var_os("PATH").unwrap_or_default();
+    let mut entries = vec![paths.tools_dir.clone()];
+    entries.extend(env::split_paths(&inherited));
+    if let Ok(path) = env::join_paths(entries) {
+        command.env("PATH", path);
+    }
+}
+
 fn install_python(
     app: &AppHandle,
     state: &ConversionState,
@@ -417,7 +468,11 @@ fn install_python(
         .map_err(|error| format!("Could not create {}: {error}", runtime_dir.display()))?;
     emit_log(app, "stdout", "Extracting private Python runtime...");
     let mut command = Command::new("/usr/bin/tar");
-    command.args(["-xzf"]).arg(&archive).arg("-C").arg(&runtime_dir);
+    command
+        .args(["-xzf"])
+        .arg(&archive)
+        .arg("-C")
+        .arg(&runtime_dir);
     run_logged_command(app, state, &mut command)?;
     if paths.python.is_file() {
         Ok(())
@@ -523,12 +578,66 @@ fn ensure_private_runtime(
     }
 }
 
+fn ensure_private_media_tools(
+    app: &AppHandle,
+    state: &ConversionState,
+) -> Result<ProcessorPaths, String> {
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    return Err("This packaged build currently supports Apple Silicon Macs only.".into());
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        let paths = private_processor_paths(app)?;
+        if media_tools_ready(&paths) {
+            return Ok(paths);
+        }
+
+        emit_status(
+            app,
+            "running",
+            "setup",
+            "Preparing private media tools",
+            None,
+        );
+        install_static_tool(app, state, &paths, "ffmpeg", FFMPEG_URL, FFMPEG_SHA256)?;
+        install_static_tool(app, state, &paths, "ffprobe", FFPROBE_URL, FFPROBE_SHA256)?;
+        Ok(paths)
+    }
+}
+
 fn processor_paths(app: &AppHandle, state: &ConversionState) -> Result<ProcessorPaths, String> {
     let local = local_processor_paths();
     if cfg!(debug_assertions) && local_runtime_ready(&local) {
         return Ok(local);
     }
     ensure_private_runtime(app, state)
+}
+
+fn media_paths(app: &AppHandle, state: &ConversionState) -> Result<ProcessorPaths, String> {
+    let local = local_processor_paths();
+    if cfg!(debug_assertions) && media_tools_ready(&local) {
+        return Ok(local);
+    }
+    ensure_private_media_tools(app, state)
+}
+
+fn atempo_filter(speed: f64) -> String {
+    let mut remaining = speed;
+    let mut factors = Vec::new();
+    while remaining < 0.5 {
+        factors.push(0.5);
+        remaining /= 0.5;
+    }
+    while remaining > 2.0 {
+        factors.push(2.0);
+        remaining /= 2.0;
+    }
+    factors.push(remaining);
+    factors
+        .into_iter()
+        .map(|factor| format!("atempo={factor:.5}"))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn run_conversion(
@@ -566,6 +675,64 @@ fn run_conversion(
         command.arg("--force-transcribe");
     }
     prepend_runtime_path(&mut command, &paths);
+    run_logged_command(app, state, &mut command)
+}
+
+fn run_slowdown(
+    app: &AppHandle,
+    state: &ConversionState,
+    options: &SlowdownOptions,
+    output_path: &Path,
+) -> Result<(), String> {
+    if !(0.1..=1.0).contains(&options.speed) {
+        return Err("Choose a speed between 0.10x and 1.00x.".into());
+    }
+
+    let video_path = PathBuf::from(&options.video_path);
+    let paths = media_paths(app, state)?;
+    let ffmpeg = paths.tools_dir.join("ffmpeg");
+    if !ffmpeg.is_file() {
+        return Err(format!("ffmpeg not found at {}.", ffmpeg.display()));
+    }
+
+    emit_status(
+        app,
+        "running",
+        "inspect",
+        "Inspecting the selected video",
+        Some(output_path),
+    );
+    emit_status(
+        app,
+        "running",
+        "transcode",
+        "Transcoding slowed video and audio",
+        Some(output_path),
+    );
+
+    let video_filter = format!("setpts=PTS/{:.5},format=yuv420p", options.speed);
+    let audio_filter = atempo_filter(options.speed);
+    let mut command = Command::new(ffmpeg);
+    command
+        .arg("-hide_banner")
+        .arg("-y")
+        .arg("-i")
+        .arg(&video_path)
+        .args(["-map", "0:v:0"])
+        .args(["-map", "0:a:0"])
+        .arg("-sn")
+        .args(["-vf", &video_filter])
+        .args(["-af", &audio_filter])
+        .args(["-c:v", "libx264"])
+        .args(["-preset", "veryfast"])
+        .args(["-crf", "22"])
+        .args(["-pix_fmt", "yuv420p"])
+        .args(["-profile:v", "high"])
+        .args(["-c:a", "aac"])
+        .args(["-b:a", "192k"])
+        .args(["-movflags", "+faststart"])
+        .arg(output_path);
+    prepend_media_path(&mut command, &paths);
     run_logged_command(app, state, &mut command)
 }
 
@@ -635,16 +802,72 @@ fn start_conversion(
 }
 
 #[tauri::command]
+fn start_slowdown(
+    app: AppHandle,
+    state: State<'_, ConversionState>,
+    options: SlowdownOptions,
+) -> Result<String, String> {
+    if state.running.swap(true, Ordering::SeqCst) {
+        return Err("A process is already running.".into());
+    }
+    state.cancel_requested.store(false, Ordering::SeqCst);
+
+    let video_path = PathBuf::from(&options.video_path);
+    if !video_path.is_file() {
+        state.running.store(false, Ordering::SeqCst);
+        return Err("Choose an existing video file first.".into());
+    }
+    let output_path = output_path_for_slowdown(&video_path, options.speed).map_err(|error| {
+        state.running.store(false, Ordering::SeqCst);
+        error
+    })?;
+
+    emit_status(
+        &app,
+        "running",
+        "setup",
+        "Checking media tools",
+        Some(&output_path),
+    );
+    let app_for_run = app.clone();
+    let output_for_run = output_path.clone();
+    thread::spawn(move || {
+        let state = app_for_run.state::<ConversionState>();
+        let result = run_slowdown(&app_for_run, &state, &options, &output_for_run);
+        state.running.store(false, Ordering::SeqCst);
+        let _ = set_child_pid(&state, None);
+
+        match result {
+            Ok(()) => emit_status(
+                &app_for_run,
+                "complete",
+                "complete",
+                "Slowed MP4 is ready",
+                Some(&output_for_run),
+            ),
+            Err(error) => {
+                emit_log(&app_for_run, "stderr", &error);
+                emit_status(
+                    &app_for_run,
+                    "error",
+                    "error",
+                    &error,
+                    Some(&output_for_run),
+                );
+            }
+        }
+    });
+
+    Ok(output_path.display().to_string())
+}
+
+#[tauri::command]
 fn stop_conversion(state: State<'_, ConversionState>) -> Result<(), String> {
     if !state.running.load(Ordering::SeqCst) {
         return Err("No conversion is running.".into());
     }
     state.cancel_requested.store(true, Ordering::SeqCst);
-    if let Some(pid) = *state
-        .child_pid
-        .lock()
-        .map_err(|_| "Process lock failed.")?
-    {
+    if let Some(pid) = *state.child_pid.lock().map_err(|_| "Process lock failed.")? {
         terminate_process(pid)?;
     }
     Ok(())
@@ -659,6 +882,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_runtime_status,
             start_conversion,
+            start_slowdown,
             stop_conversion
         ])
         .run(tauri::generate_context!())

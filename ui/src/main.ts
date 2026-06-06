@@ -16,6 +16,8 @@ import {
   createIcons,
 } from "lucide";
 
+type Workflow = "dialogue" | "processing";
+
 type ConversionStatus = {
   status: "idle" | "running" | "complete" | "error";
   phase: string;
@@ -33,17 +35,26 @@ type RuntimeStatus = {
   message: string;
 };
 
-const phases = [
-  ["setup", "Prepare runtime"],
-  ["inspect", "Inspect source"],
-  ["extract", "Extract audio"],
-  ["transcribe", "Transcribe German"],
-  ["filter", "Filter dialogue"],
-  ["render", "Render segments"],
-  ["stitch", "Stitch MP4"],
-] as const;
+const workflowPhases: Record<Workflow, readonly (readonly [string, string])[]> = {
+  dialogue: [
+    ["setup", "Prepare runtime"],
+    ["inspect", "Inspect source"],
+    ["extract", "Extract audio"],
+    ["transcribe", "Transcribe German"],
+    ["filter", "Filter dialogue"],
+    ["render", "Render segments"],
+    ["stitch", "Stitch MP4"],
+  ],
+  processing: [
+    ["setup", "Prepare tools"],
+    ["inspect", "Inspect source"],
+    ["transcode", "Transcode slower"],
+  ],
+};
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
+let activeWorkflow: Workflow = "dialogue";
+let runningWorkflow: Workflow | null = null;
 let currentStatus: ConversionStatus = {
   status: "idle",
   phase: "inspect",
@@ -64,83 +75,160 @@ app.innerHTML = `
 
   <div class="workspace">
     <section class="main-panel">
-      <section class="section-block source-block">
-        <div class="section-heading">
-          <div>
-            <span class="eyebrow">Source</span>
-            <h2>Select a movie</h2>
-          </div>
-          <i data-lucide="file-text"></i>
-        </div>
-        <div class="file-row">
-          <input id="video-path" type="text" placeholder="/path/to/movie.mkv" spellcheck="false" />
-          <button id="browse-button" class="icon-button" type="button" title="Choose video">
-            <i data-lucide="folder-open"></i>
-          </button>
-        </div>
-      </section>
-
-      <section class="section-block">
-        <div class="section-heading">
-          <div>
-            <span class="eyebrow">Cut profile</span>
-            <h2>Strict dialogue</h2>
-          </div>
+      <nav class="mode-tabs" aria-label="Workflow">
+        <button id="dialogue-tab" class="tab-button active" type="button">
+          <i data-lucide="film"></i>
+          <span>Dialogue cut</span>
+        </button>
+        <button id="processing-tab" class="tab-button" type="button">
           <i data-lucide="settings-2"></i>
-        </div>
-        <div class="settings-grid">
-          <label>
-            <span>Pre-roll</span>
-            <div class="number-field"><input id="pre-pad" type="number" min="0" step="0.1" value="0.3" /><em>s</em></div>
-          </label>
-          <label>
-            <span>Post-roll</span>
-            <div class="number-field"><input id="post-pad" type="number" min="0" step="0.1" value="0.5" /><em>s</em></div>
-          </label>
-          <label>
-            <span>Merge gap</span>
-            <div class="number-field"><input id="merge-gap" type="number" min="0" step="0.1" value="1.0" /><em>s</em></div>
-          </label>
-        </div>
-        <div class="toggle-row">
-          <label class="toggle-label">
-            <input id="force-transcribe" type="checkbox" />
-            <span class="toggle"></span>
-            <span>
-              <strong>Force Whisper transcript</strong>
-              <small>Use when embedded subtitles are forced-only or incomplete.</small>
-            </span>
-          </label>
-        </div>
-        <div class="runtime-row">
-          <i data-lucide="hard-drive-download"></i>
-          <div>
-            <strong>Processing runtime</strong>
-            <small id="runtime-message">Checking private runtime...</small>
-          </div>
-          <span id="runtime-chip" class="runtime-chip pending">Checking</span>
-        </div>
-      </section>
+          <span>Video processing</span>
+        </button>
+      </nav>
 
-      <section class="section-block run-block">
-        <div class="section-heading compact">
-          <div>
-            <span class="eyebrow">Run</span>
-            <h2 id="run-message">Choose a movie file to begin</h2>
+      <div id="dialogue-panel" class="tab-panel active">
+        <section class="section-block source-block">
+          <div class="section-heading">
+            <div>
+              <span class="eyebrow">Source</span>
+              <h2>Select a movie</h2>
+            </div>
+            <i data-lucide="file-text"></i>
           </div>
-        </div>
-        <div class="action-row">
-          <button id="start-button" class="primary-button" type="button">
-            <i data-lucide="play"></i>
-            <span>Start conversion</span>
-          </button>
-          <button id="stop-button" class="secondary-button" type="button" disabled>
-            <i data-lucide="square"></i>
-            <span>Cancel</span>
-          </button>
-        </div>
-        <p id="output-path" class="output-path"></p>
-      </section>
+          <div class="file-row">
+            <input id="dialogue-video-path" type="text" placeholder="/path/to/movie.mkv" spellcheck="false" />
+            <button id="dialogue-browse-button" class="icon-button" type="button" title="Choose video">
+              <i data-lucide="folder-open"></i>
+            </button>
+          </div>
+        </section>
+
+        <section class="section-block">
+          <div class="section-heading">
+            <div>
+              <span class="eyebrow">Cut profile</span>
+              <h2>Strict dialogue</h2>
+            </div>
+            <i data-lucide="settings-2"></i>
+          </div>
+          <div class="settings-grid">
+            <label>
+              <span>Pre-roll</span>
+              <div class="number-field"><input id="pre-pad" type="number" min="0" step="0.1" value="0.3" /><em>s</em></div>
+            </label>
+            <label>
+              <span>Post-roll</span>
+              <div class="number-field"><input id="post-pad" type="number" min="0" step="0.1" value="0.5" /><em>s</em></div>
+            </label>
+            <label>
+              <span>Merge gap</span>
+              <div class="number-field"><input id="merge-gap" type="number" min="0" step="0.1" value="1.0" /><em>s</em></div>
+            </label>
+          </div>
+          <div class="toggle-row">
+            <label class="toggle-label">
+              <input id="force-transcribe" type="checkbox" />
+              <span class="toggle"></span>
+              <span>
+                <strong>Force Whisper transcript</strong>
+                <small>Use when embedded subtitles are forced-only or incomplete.</small>
+              </span>
+            </label>
+          </div>
+          <div class="runtime-row">
+            <i data-lucide="hard-drive-download"></i>
+            <div>
+              <strong>Processing runtime</strong>
+              <small id="runtime-message">Checking private runtime...</small>
+            </div>
+            <span id="runtime-chip" class="runtime-chip pending">Checking</span>
+          </div>
+        </section>
+
+        <section class="section-block run-block">
+          <div class="section-heading compact">
+            <div>
+              <span class="eyebrow">Run</span>
+              <h2 id="dialogue-run-message">Choose a movie file to begin</h2>
+            </div>
+          </div>
+          <div class="action-row">
+            <button id="dialogue-start-button" class="primary-button" type="button">
+              <i data-lucide="play"></i>
+              <span>Start conversion</span>
+            </button>
+            <button id="dialogue-stop-button" class="secondary-button" type="button" disabled>
+              <i data-lucide="square"></i>
+              <span>Cancel</span>
+            </button>
+          </div>
+          <p id="dialogue-output-path" class="output-path"></p>
+        </section>
+      </div>
+
+      <div id="processing-panel" class="tab-panel">
+        <section class="section-block source-block">
+          <div class="section-heading">
+            <div>
+              <span class="eyebrow">Source</span>
+              <h2>Select a video</h2>
+            </div>
+            <i data-lucide="file-text"></i>
+          </div>
+          <div class="file-row">
+            <input id="processing-video-path" type="text" placeholder="/path/to/video.mkv" spellcheck="false" />
+            <button id="processing-browse-button" class="icon-button" type="button" title="Choose video">
+              <i data-lucide="folder-open"></i>
+            </button>
+          </div>
+        </section>
+
+        <section class="section-block">
+          <div class="section-heading">
+            <div>
+              <span class="eyebrow">Speed profile</span>
+              <h2>Dubbing slow-down</h2>
+            </div>
+            <i data-lucide="settings-2"></i>
+          </div>
+          <div class="speed-grid">
+            <label>
+              <span>Playback speed</span>
+              <div class="number-field"><input id="slow-speed" type="number" min="0.1" max="1" step="0.05" value="0.50" /><em>x</em></div>
+            </label>
+            <div class="range-field">
+              <input id="slow-speed-range" type="range" min="0.1" max="1" step="0.05" value="0.50" />
+              <div class="range-labels"><span>0.10x</span><span>1.00x</span></div>
+            </div>
+          </div>
+          <div class="preset-row">
+            <button class="preset-button active" type="button" data-speed="0.50">0.50x</button>
+            <button class="preset-button" type="button" data-speed="0.65">0.65x</button>
+            <button class="preset-button" type="button" data-speed="0.75">0.75x</button>
+            <button class="preset-button" type="button" data-speed="0.85">0.85x</button>
+          </div>
+        </section>
+
+        <section class="section-block run-block">
+          <div class="section-heading compact">
+            <div>
+              <span class="eyebrow">Run</span>
+              <h2 id="processing-run-message">Choose a video file to begin</h2>
+            </div>
+          </div>
+          <div class="action-row">
+            <button id="processing-start-button" class="primary-button" type="button">
+              <i data-lucide="play"></i>
+              <span>Start transcode</span>
+            </button>
+            <button id="processing-stop-button" class="secondary-button" type="button" disabled>
+              <i data-lucide="square"></i>
+              <span>Cancel</span>
+            </button>
+          </div>
+          <p id="processing-output-path" class="output-path"></p>
+        </section>
+      </div>
     </section>
 
     <aside class="side-panel">
@@ -156,7 +244,7 @@ app.innerHTML = `
           </div>
           <i data-lucide="terminal"></i>
         </div>
-        <pre id="log-output">Waiting for a conversion...</pre>
+        <pre id="log-output">Waiting for a run...</pre>
       </section>
     </aside>
   </div>
@@ -178,29 +266,51 @@ createIcons({
   },
 });
 
-const videoPath = document.querySelector<HTMLInputElement>("#video-path")!;
-const browseButton = document.querySelector<HTMLButtonElement>("#browse-button")!;
-const startButton = document.querySelector<HTMLButtonElement>("#start-button")!;
-const stopButton = document.querySelector<HTMLButtonElement>("#stop-button")!;
+const dialogueTab = document.querySelector<HTMLButtonElement>("#dialogue-tab")!;
+const processingTab = document.querySelector<HTMLButtonElement>("#processing-tab")!;
+const dialoguePanel = document.querySelector<HTMLElement>("#dialogue-panel")!;
+const processingPanel = document.querySelector<HTMLElement>("#processing-panel")!;
+const dialogueVideoPath = document.querySelector<HTMLInputElement>("#dialogue-video-path")!;
+const processingVideoPath = document.querySelector<HTMLInputElement>("#processing-video-path")!;
+const dialogueBrowseButton = document.querySelector<HTMLButtonElement>("#dialogue-browse-button")!;
+const processingBrowseButton = document.querySelector<HTMLButtonElement>("#processing-browse-button")!;
+const dialogueStartButton = document.querySelector<HTMLButtonElement>("#dialogue-start-button")!;
+const processingStartButton = document.querySelector<HTMLButtonElement>("#processing-start-button")!;
+const dialogueStopButton = document.querySelector<HTMLButtonElement>("#dialogue-stop-button")!;
+const processingStopButton = document.querySelector<HTMLButtonElement>("#processing-stop-button")!;
 const forceTranscribe = document.querySelector<HTMLInputElement>("#force-transcribe")!;
 const statusChip = document.querySelector<HTMLElement>("#status-chip")!;
-const runMessage = document.querySelector<HTMLElement>("#run-message")!;
-const outputPath = document.querySelector<HTMLElement>("#output-path")!;
+const dialogueRunMessage = document.querySelector<HTMLElement>("#dialogue-run-message")!;
+const processingRunMessage = document.querySelector<HTMLElement>("#processing-run-message")!;
+const dialogueOutputPath = document.querySelector<HTMLElement>("#dialogue-output-path")!;
+const processingOutputPath = document.querySelector<HTMLElement>("#processing-output-path")!;
 const logOutput = document.querySelector<HTMLElement>("#log-output")!;
 const phaseList = document.querySelector<HTMLOListElement>("#phase-list")!;
 const runtimeChip = document.querySelector<HTMLElement>("#runtime-chip")!;
 const runtimeMessage = document.querySelector<HTMLElement>("#runtime-message")!;
+const slowSpeed = document.querySelector<HTMLInputElement>("#slow-speed")!;
+const slowSpeedRange = document.querySelector<HTMLInputElement>("#slow-speed-range")!;
+const presetButtons = Array.from(document.querySelectorAll<HTMLButtonElement>(".preset-button"));
 
 function numberValue(id: string): number {
   return Number(document.querySelector<HTMLInputElement>(`#${id}`)!.value);
 }
 
+function phasesForRender() {
+  return workflowPhases[runningWorkflow ?? activeWorkflow];
+}
+
 function phaseIndex(phase: string): number {
+  const phases = phasesForRender();
+  if (phase === "complete") {
+    return phases.length;
+  }
   const index = phases.findIndex(([id]) => id === phase);
   return index === -1 ? 0 : index;
 }
 
 function renderPhases() {
+  const phases = phasesForRender();
   const activeIndex = phaseIndex(currentStatus.phase);
   phaseList.innerHTML = phases
     .map(([, label], index) => {
@@ -214,9 +324,32 @@ function renderPhases() {
   createIcons({ icons: { CheckCircle2, Circle, LoaderCircle } });
 }
 
+function setActiveWorkflow(workflow: Workflow) {
+  activeWorkflow = workflow;
+  dialogueTab.classList.toggle("active", workflow === "dialogue");
+  processingTab.classList.toggle("active", workflow === "processing");
+  dialoguePanel.classList.toggle("active", workflow === "dialogue");
+  processingPanel.classList.toggle("active", workflow === "processing");
+  renderPhases();
+}
+
+function setRunControls(running: boolean) {
+  dialogueStartButton.disabled = running;
+  processingStartButton.disabled = running;
+  dialogueStopButton.disabled = !running;
+  processingStopButton.disabled = !running;
+  dialogueBrowseButton.disabled = running;
+  processingBrowseButton.disabled = running;
+}
+
+function workflowForStatus(): Workflow {
+  return runningWorkflow ?? activeWorkflow;
+}
+
 function setStatus(status: ConversionStatus) {
   currentStatus = status;
   const running = status.status === "running";
+  const workflow = workflowForStatus();
   statusChip.className = `status-chip ${status.status}`;
   statusChip.textContent =
     status.status === "complete"
@@ -226,16 +359,20 @@ function setStatus(status: ConversionStatus) {
         : running
           ? "Running"
           : "Ready";
+
+  const runMessage = workflow === "dialogue" ? dialogueRunMessage : processingRunMessage;
+  const outputPath = workflow === "dialogue" ? dialogueOutputPath : processingOutputPath;
   runMessage.textContent = status.message;
   outputPath.textContent = status.outputPath ?? "";
-  startButton.disabled = running;
-  stopButton.disabled = !running;
-  browseButton.disabled = running;
+  setRunControls(running);
   renderPhases();
+  if (!running) {
+    runningWorkflow = null;
+  }
 }
 
 function appendLog(entry: ConversionLog) {
-  if (logOutput.textContent === "Waiting for a conversion...") {
+  if (logOutput.textContent === "Waiting for a run...") {
     logOutput.textContent = "";
   }
   const prefix = entry.stream === "stderr" ? "! " : "  ";
@@ -249,24 +386,54 @@ function setRuntimeStatus(status: RuntimeStatus) {
   runtimeMessage.textContent = status.message;
 }
 
-browseButton.addEventListener("click", async () => {
+function updateSpeed(value: string) {
+  const numeric = Math.min(1, Math.max(0.1, Number(value) || 0.5));
+  const formatted = numeric.toFixed(2);
+  slowSpeed.value = formatted;
+  slowSpeedRange.value = formatted;
+  presetButtons.forEach((button) => {
+    button.classList.toggle("active", Number(button.dataset.speed) === numeric);
+  });
+}
+
+async function chooseVideo(target: HTMLInputElement, workflow: Workflow) {
   const selected = await open({
     multiple: false,
     directory: false,
     filters: [{ name: "Video", extensions: ["mkv", "mp4", "mov", "m4v", "webm"] }],
   });
   if (typeof selected === "string") {
-    videoPath.value = selected;
-    setStatus({ status: "idle", phase: "inspect", message: "Ready to convert" });
+    target.value = selected;
+    setActiveWorkflow(workflow);
+    setStatus({
+      status: "idle",
+      phase: "inspect",
+      message: workflow === "dialogue" ? "Ready to convert" : "Ready to transcode",
+    });
   }
+}
+
+dialogueTab.addEventListener("click", () => setActiveWorkflow("dialogue"));
+processingTab.addEventListener("click", () => setActiveWorkflow("processing"));
+dialogueBrowseButton.addEventListener("click", () => chooseVideo(dialogueVideoPath, "dialogue"));
+processingBrowseButton.addEventListener("click", () =>
+  chooseVideo(processingVideoPath, "processing"),
+);
+
+slowSpeed.addEventListener("input", () => updateSpeed(slowSpeed.value));
+slowSpeedRange.addEventListener("input", () => updateSpeed(slowSpeedRange.value));
+presetButtons.forEach((button) => {
+  button.addEventListener("click", () => updateSpeed(button.dataset.speed ?? "0.50"));
 });
 
-startButton.addEventListener("click", async () => {
+dialogueStartButton.addEventListener("click", async () => {
+  setActiveWorkflow("dialogue");
+  runningWorkflow = "dialogue";
   logOutput.textContent = "";
   try {
     const expectedOutput = await invoke<string>("start_conversion", {
       options: {
-        videoPath: videoPath.value.trim(),
+        videoPath: dialogueVideoPath.value.trim(),
         forceTranscribe: forceTranscribe.checked,
         prePad: numberValue("pre-pad"),
         postPad: numberValue("post-pad"),
@@ -275,7 +442,7 @@ startButton.addEventListener("click", async () => {
         keepSources: "dialogue,mixed",
       },
     });
-    outputPath.textContent = expectedOutput;
+    dialogueOutputPath.textContent = expectedOutput;
   } catch (error) {
     setStatus({
       status: "error",
@@ -285,19 +452,45 @@ startButton.addEventListener("click", async () => {
   }
 });
 
-stopButton.addEventListener("click", async () => {
+processingStartButton.addEventListener("click", async () => {
+  setActiveWorkflow("processing");
+  runningWorkflow = "processing";
+  logOutput.textContent = "";
+  try {
+    const expectedOutput = await invoke<string>("start_slowdown", {
+      options: {
+        videoPath: processingVideoPath.value.trim(),
+        speed: Number(slowSpeed.value),
+      },
+    });
+    processingOutputPath.textContent = expectedOutput;
+  } catch (error) {
+    setStatus({
+      status: "error",
+      phase: "error",
+      message: String(error),
+    });
+  }
+});
+
+async function stopCurrentRun() {
   try {
     await invoke("stop_conversion");
     appendLog({ stream: "stderr", line: "Cancel requested." });
   } catch (error) {
     appendLog({ stream: "stderr", line: String(error) });
   }
-});
+}
+
+dialogueStopButton.addEventListener("click", stopCurrentRun);
+processingStopButton.addEventListener("click", stopCurrentRun);
 
 listen<ConversionLog>("conversion-log", ({ payload }) => appendLog(payload));
 listen<ConversionStatus>("conversion-state", ({ payload }) => setStatus(payload));
 listen<RuntimeStatus>("runtime-state", ({ payload }) => setRuntimeStatus(payload));
+setActiveWorkflow(activeWorkflow);
 setStatus(currentStatus);
+updateSpeed(slowSpeed.value);
 invoke<RuntimeStatus>("get_runtime_status")
   .then(setRuntimeStatus)
   .catch((error) =>

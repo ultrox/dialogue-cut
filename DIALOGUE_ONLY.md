@@ -45,6 +45,10 @@ Use the desktop window to select a video, tune padding, force Whisper when
 embedded subtitles are incomplete, start a conversion, cancel a run, and watch
 the live process log.
 
+The `Video processing` tab creates slowed H.264/AAC MP4 files for dubbing
+practice. For example, `0.50x` doubles the duration while preserving audio pitch.
+Outputs are written beside the source video as `movie.slow-0.50x.mp4`.
+
 ### Shareable macOS app
 
 Build the Apple Silicon macOS app and DMG:
