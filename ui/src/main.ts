@@ -10,7 +10,6 @@ import {
   HardDriveDownload,
   LoaderCircle,
   Play,
-  Search,
   Settings2,
   Square,
   Terminal,
@@ -274,18 +273,23 @@ app.innerHTML = `
           </div>
           <div class="input-action-row">
             <input id="grab-url" type="text" placeholder="https://..." spellcheck="false" />
-            <button id="grab-inspect-button" class="secondary-button" type="button">
-              <i data-lucide="search"></i>
-              <span>Inspect</span>
+            <button id="grabber-start-button" class="primary-button" type="button">
+              <i data-lucide="play"></i>
+              <span id="grabber-action-label">Start</span>
+            </button>
+            <button id="grabber-stop-button" class="secondary-button" type="button" disabled>
+              <i data-lucide="square"></i>
+              <span>Cancel</span>
             </button>
           </div>
+          <p id="grabber-run-message" class="inline-status">Paste a URL to begin</p>
         </section>
 
         <section class="section-block source-block">
           <div class="section-heading">
             <div>
               <span class="eyebrow">Destination</span>
-              <h2>Choose a folder</h2>
+              <h2>Output folder</h2>
             </div>
             <i data-lucide="folder-open"></i>
           </div>
@@ -295,13 +299,14 @@ app.innerHTML = `
               <i data-lucide="folder-open"></i>
             </button>
           </div>
+          <p id="grabber-output-path" class="output-path"></p>
         </section>
 
         <section id="grabber-metadata-section" class="section-block metadata-block" hidden>
           <div class="section-heading">
             <div>
               <span class="eyebrow">Metadata</span>
-              <h2 id="grabber-title">Inspect a URL first</h2>
+              <h2 id="grabber-title">Start with a URL</h2>
             </div>
             <i data-lucide="settings-2"></i>
           </div>
@@ -346,25 +351,6 @@ app.innerHTML = `
           </div>
         </section>
 
-        <section class="section-block run-block">
-          <div class="section-heading compact">
-            <div>
-              <span class="eyebrow">Run</span>
-              <h2 id="grabber-run-message">Paste a URL to begin</h2>
-            </div>
-          </div>
-          <div class="action-row">
-            <button id="grabber-start-button" class="primary-button" type="button">
-              <i data-lucide="play"></i>
-              <span>Start download</span>
-            </button>
-            <button id="grabber-stop-button" class="secondary-button" type="button" disabled>
-              <i data-lucide="square"></i>
-              <span>Cancel</span>
-            </button>
-          </div>
-          <p id="grabber-output-path" class="output-path"></p>
-        </section>
       </div>
     </section>
 
@@ -397,7 +383,6 @@ createIcons({
     HardDriveDownload,
     LoaderCircle,
     Play,
-    Search,
     Settings2,
     Square,
     Terminal,
@@ -419,10 +404,10 @@ const processingBrowseButton = document.querySelector<HTMLButtonElement>("#proce
 const grabOutputBrowseButton = document.querySelector<HTMLButtonElement>(
   "#grab-output-browse-button",
 )!;
-const grabInspectButton = document.querySelector<HTMLButtonElement>("#grab-inspect-button")!;
 const dialogueStartButton = document.querySelector<HTMLButtonElement>("#dialogue-start-button")!;
 const processingStartButton = document.querySelector<HTMLButtonElement>("#processing-start-button")!;
 const grabberStartButton = document.querySelector<HTMLButtonElement>("#grabber-start-button")!;
+const grabberActionLabel = document.querySelector<HTMLElement>("#grabber-action-label")!;
 const dialogueStopButton = document.querySelector<HTMLButtonElement>("#dialogue-stop-button")!;
 const processingStopButton = document.querySelector<HTMLButtonElement>("#processing-stop-button")!;
 const grabberStopButton = document.querySelector<HTMLButtonElement>("#grabber-stop-button")!;
@@ -501,7 +486,6 @@ function setRunControls(running: boolean) {
   dialogueBrowseButton.disabled = running;
   processingBrowseButton.disabled = running;
   grabOutputBrowseButton.disabled = running;
-  grabInspectButton.disabled = running;
   applyGrabControlState(running);
 }
 
@@ -536,7 +520,7 @@ function setStatus(status: ConversionStatus) {
         ? processingOutputPath
         : grabberOutputPath;
   runMessage.textContent = status.message;
-  outputPath.textContent = status.outputPath ?? "";
+  outputPath.textContent = status.outputPath ?? (workflow === "grabber" ? grabOutputDir.value.trim() : "");
   setRunControls(running);
   renderPhases();
   if (!running) {
@@ -559,6 +543,12 @@ function setRuntimeStatus(status: RuntimeStatus) {
   runtimeMessage.textContent = status.message;
 }
 
+function setGrabOutputDir(path: string) {
+  grabOutputDir.value = path;
+  grabberOutputPath.textContent = path;
+  applyGrabControlState();
+}
+
 function selectedSubtitleLanguages(): string[] {
   return Array.from(
     grabSubtitleOptions.querySelectorAll<HTMLInputElement>("input[type='checkbox']:checked"),
@@ -568,7 +558,7 @@ function selectedSubtitleLanguages(): string[] {
 }
 
 function canStartGrab(): boolean {
-  if (!grabMetadata || !grabOutputDir.value.trim()) {
+  if (!grabMetadata) {
     return false;
   }
   if (!grabVideo.checked && !grabSubtitles.checked) {
@@ -582,7 +572,8 @@ function canStartGrab(): boolean {
 
 function applyGrabControlState(running = currentStatus.status === "running") {
   const hasMetadata = grabMetadata !== null;
-  grabberStartButton.disabled = running || !canStartGrab();
+  grabberActionLabel.textContent = hasMetadata ? "Download" : "Start";
+  grabberStartButton.disabled = running || (!hasMetadata ? !grabUrl.value.trim() : !canStartGrab());
   grabQuality.disabled = running || !hasMetadata || !grabVideo.checked;
   grabSubtitleOptions
     .querySelectorAll<HTMLInputElement>("input[type='checkbox']")
@@ -696,13 +687,13 @@ async function chooseVideo(target: HTMLInputElement, workflow: Workflow) {
   }
 }
 
-async function chooseDirectory(target: HTMLInputElement) {
+async function chooseDirectory() {
   const selected = await open({
     multiple: false,
     directory: true,
   });
   if (typeof selected === "string") {
-    target.value = selected;
+    setGrabOutputDir(selected);
     setActiveWorkflow("grabber");
     setStatus({
       status: "idle",
@@ -720,14 +711,17 @@ dialogueBrowseButton.addEventListener("click", () => chooseVideo(dialogueVideoPa
 processingBrowseButton.addEventListener("click", () =>
   chooseVideo(processingVideoPath, "processing"),
 );
-grabOutputBrowseButton.addEventListener("click", () => chooseDirectory(grabOutputDir));
-grabOutputDir.addEventListener("input", () => applyGrabControlState());
+grabOutputBrowseButton.addEventListener("click", () => chooseDirectory());
+grabOutputDir.addEventListener("input", () => {
+  grabberOutputPath.textContent = grabOutputDir.value.trim();
+  applyGrabControlState();
+});
 grabUrl.addEventListener("input", () => {
   resetGrabMetadata();
   setStatus({
     status: "idle",
     phase: "fetch",
-    message: grabUrl.value.trim() ? "Inspect URL to choose options" : "Paste a URL to begin",
+    message: grabUrl.value.trim() ? "Start to load options" : "Paste a URL to begin",
   });
 });
 grabVideo.addEventListener("change", () => applyGrabControlState());
@@ -787,7 +781,7 @@ processingStartButton.addEventListener("click", async () => {
   }
 });
 
-grabInspectButton.addEventListener("click", async () => {
+async function inspectGrabUrl() {
   setActiveWorkflow("grabber");
   runningWorkflow = "grabber";
   logOutput.textContent = "";
@@ -814,9 +808,9 @@ grabInspectButton.addEventListener("click", async () => {
   } finally {
     applyGrabControlState();
   }
-});
+}
 
-grabberStartButton.addEventListener("click", async () => {
+async function downloadGrabSelection() {
   setActiveWorkflow("grabber");
   runningWorkflow = "grabber";
   logOutput.textContent = "";
@@ -839,6 +833,14 @@ grabberStartButton.addEventListener("click", async () => {
       message: String(error),
     });
   }
+}
+
+grabberStartButton.addEventListener("click", async () => {
+  if (grabMetadata) {
+    await downloadGrabSelection();
+  } else {
+    await inspectGrabUrl();
+  }
 });
 
 async function stopCurrentRun() {
@@ -860,6 +862,13 @@ listen<RuntimeStatus>("runtime-state", ({ payload }) => setRuntimeStatus(payload
 setActiveWorkflow(activeWorkflow);
 setStatus(currentStatus);
 updateSpeed(slowSpeed.value);
+invoke<string>("get_default_grab_output_dir")
+  .then((path) => {
+    if (!grabOutputDir.value.trim()) {
+      setGrabOutputDir(path);
+    }
+  })
+  .catch((error) => appendLog({ stream: "stderr", line: String(error) }));
 invoke<RuntimeStatus>("get_runtime_status")
   .then(setRuntimeStatus)
   .catch((error) =>

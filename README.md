@@ -8,8 +8,8 @@ It also includes a video-processing tab for slowing audio and video together,
 which is useful when preparing footage for dubbing practice.
 
 The desktop app also has a material-grabber tab that wraps `yt-dlp` for this
-workflow: paste one URL, inspect metadata, then choose video quality and exact
-subtitle tracks before downloading.
+workflow: paste one URL, click `Start`, then choose video quality and exact
+subtitle tracks before the same button changes to `Download`.
 
 Use it only with media you have the right to process.
 
@@ -53,10 +53,12 @@ movie.slow-0.50x.mp4
 
 ## Material Grabber
 
-In the desktop app, open `Material grabber`, paste a URL, and click `Inspect`.
+In the desktop app, open `Material grabber`, paste a URL, and click `Start`.
 The app asks `yt-dlp` for metadata first, then shows available video heights and
-exact subtitle language tracks. Choose a destination folder and start the
-download. The app uses a fixed `yt-dlp` preset:
+exact subtitle language tracks. The output folder defaults to
+`~/Downloads/Dialogue Cut Material`; change it only when you want a different
+destination. The same button changes to `Download` after metadata is loaded.
+The app uses a fixed `yt-dlp` preset:
 
 - one URL at a time, no playlist expansion
 - selected quality cap, or best available

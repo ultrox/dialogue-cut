@@ -216,7 +216,7 @@ small {
 
 .input-action-row {
   max-width: 760px;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
 }
 
 input[type="text"],
@@ -458,6 +458,13 @@ input:focus {
 .meta-line {
   min-height: 16px;
   margin: -8px 0 18px;
+  color: #65736e;
+  font-size: 12px;
+}
+
+.inline-status {
+  min-height: 17px;
+  margin-top: 10px;
   color: #65736e;
   font-size: 12px;
 }

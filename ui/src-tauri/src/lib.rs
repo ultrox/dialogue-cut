@@ -267,6 +267,10 @@ fn output_template_for_grab(output_dir: &Path) -> PathBuf {
     output_dir.join("%(title).200B [%(id)s].%(ext)s")
 }
 
+fn default_grab_output_dir() -> PathBuf {
+    dirs_home().join("Downloads").join("Dialogue Cut Material")
+}
+
 fn emit_status(
     app: &AppHandle,
     status: &str,
@@ -1310,6 +1314,14 @@ fn start_slowdown(
 }
 
 #[tauri::command]
+fn get_default_grab_output_dir() -> Result<String, String> {
+    let output_dir = default_grab_output_dir();
+    fs::create_dir_all(&output_dir)
+        .map_err(|error| format!("Could not create {}: {error}", output_dir.display()))?;
+    Ok(output_dir.display().to_string())
+}
+
+#[tauri::command]
 fn probe_grab(
     app: AppHandle,
     state: State<'_, ConversionState>,
@@ -1369,11 +1381,11 @@ fn start_grab(
         state.running.store(false, Ordering::SeqCst);
         return Err("Choose at least one subtitle track.".into());
     }
-    let output_dir = PathBuf::from(options.output_dir.trim());
-    if output_dir.as_os_str().is_empty() {
-        state.running.store(false, Ordering::SeqCst);
-        return Err("Choose an output folder first.".into());
-    }
+    let output_dir = if options.output_dir.trim().is_empty() {
+        default_grab_output_dir()
+    } else {
+        PathBuf::from(options.output_dir.trim())
+    };
 
     emit_status(
         &app,
@@ -1434,6 +1446,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             get_runtime_status,
+            get_default_grab_output_dir,
             start_conversion,
             start_slowdown,
             probe_grab,
