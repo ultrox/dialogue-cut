@@ -1,0 +1,44 @@
+# Local runtimes and dependency installs
+.dialogue-venv/
+ui/node_modules/
+
+# Build output
+ui/dist/
+ui/src-tauri/target/
+ui/src-tauri/gen/schemas/
+*.dmg
+*.app
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Local env and editor noise
+.env
+.env.*
+.DS_Store
+.idea/
+
+# Media, transcripts, and generated dialogue-cut artifacts
+*.mkv
+*.mp4
+*.mov
+*.m4v
+*.webm
+*.avi
+*.wav
+*.aac
+*.ac3
+*.srt
+*.ass
+*.ssa
+*.vtt
+*.tsv
+*.ffconcat
+*.select-filter.txt
+*.parts/
+*.16k.wav
+*.dialogue-project.json
+*.dialogue-review.txt
+*.dialogue-only.*
+

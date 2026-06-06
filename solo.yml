@@ -1,0 +1,14 @@
+name: Dialogue Cut
+icon_initials: DC
+processes:
+  Dialogue Cut UI:
+    command: npm run tauri dev
+    working_dir: ./ui
+    auto_start: false
+    auto_restart: false
+    restart_when_changed:
+      - ui/src/**/*.ts
+      - ui/src/**/*.css
+      - ui/src-tauri/src/**/*.rs
+      - ui/src-tauri/tauri.conf.json
+      - ui/package.json
