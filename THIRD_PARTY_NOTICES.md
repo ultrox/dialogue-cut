@@ -23,3 +23,8 @@ The private Python runtime installs
 and its Python dependencies from PyPI. Whisper model files are downloaded from
 the selected Hugging Face model repository on first transcription and cached
 under Dialogue Cut's Application Support directory.
+
+## yt-dlp
+
+The material grabber installs [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) and
+its Python dependencies from PyPI into the private runtime when needed.

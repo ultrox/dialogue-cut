@@ -49,6 +49,11 @@ The `Video processing` tab creates slowed H.264/AAC MP4 files for dubbing
 practice. For example, `0.50x` doubles the duration while preserving audio pitch.
 Outputs are written beside the source video as `movie.slow-0.50x.mp4`.
 
+The `Material grabber` tab wraps `yt-dlp` for one-URL downloads. Paste a URL,
+choose a folder, and choose whether to download video, subtitles, or both. The
+default subtitle language field is `de,en`, which asks `yt-dlp` for German and
+English caption tracks when available. Subtitle files are converted to SRT.
+
 ### Shareable macOS app
 
 Build the Apple Silicon macOS app and DMG:
@@ -67,9 +72,9 @@ src-tauri/target/release/bundle/dmg/Dialogue Cut_0.1.0_aarch64.dmg
 
 The shared app does not rely on Homebrew or a system Python installation. On
 the first conversion it installs a checksum-verified private Python runtime,
-`ffmpeg`, `ffprobe`, and MLX Whisper dependencies under the app's Application
-Support directory. The Whisper model downloads automatically on the first
-transcription and remains cached.
+`ffmpeg`, `ffprobe`, MLX Whisper dependencies, and `yt-dlp` under the app's
+Application Support directory. The Whisper model downloads automatically on the
+first transcription and remains cached.
 
 Current distribution target: Apple Silicon Mac with macOS 13.5 or newer.
 

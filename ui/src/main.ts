@@ -16,7 +16,7 @@ import {
   createIcons,
 } from "lucide";
 
-type Workflow = "dialogue" | "processing";
+type Workflow = "dialogue" | "processing" | "grabber";
 
 type ConversionStatus = {
   status: "idle" | "running" | "complete" | "error";
@@ -49,6 +49,12 @@ const workflowPhases: Record<Workflow, readonly (readonly [string, string])[]> =
     ["setup", "Prepare tools"],
     ["inspect", "Inspect source"],
     ["transcode", "Transcode slower"],
+  ],
+  grabber: [
+    ["setup", "Prepare downloader"],
+    ["fetch", "Fetch metadata"],
+    ["download", "Download material"],
+    ["subtitles", "Save subtitles"],
   ],
 };
 
@@ -83,6 +89,10 @@ app.innerHTML = `
         <button id="processing-tab" class="tab-button" type="button">
           <i data-lucide="settings-2"></i>
           <span>Video processing</span>
+        </button>
+        <button id="grabber-tab" class="tab-button" type="button">
+          <i data-lucide="hard-drive-download"></i>
+          <span>Material grabber</span>
         </button>
       </nav>
 
@@ -229,6 +239,91 @@ app.innerHTML = `
           <p id="processing-output-path" class="output-path"></p>
         </section>
       </div>
+
+      <div id="grabber-panel" class="tab-panel">
+        <section class="section-block source-block">
+          <div class="section-heading">
+            <div>
+              <span class="eyebrow">Source</span>
+              <h2>Paste a URL</h2>
+            </div>
+            <i data-lucide="hard-drive-download"></i>
+          </div>
+          <div class="url-row">
+            <input id="grab-url" type="text" placeholder="https://..." spellcheck="false" />
+          </div>
+        </section>
+
+        <section class="section-block source-block">
+          <div class="section-heading">
+            <div>
+              <span class="eyebrow">Destination</span>
+              <h2>Choose a folder</h2>
+            </div>
+            <i data-lucide="folder-open"></i>
+          </div>
+          <div class="file-row">
+            <input id="grab-output-dir" type="text" placeholder="/path/to/material" spellcheck="false" />
+            <button id="grab-output-browse-button" class="icon-button" type="button" title="Choose folder">
+              <i data-lucide="folder-open"></i>
+            </button>
+          </div>
+        </section>
+
+        <section class="section-block">
+          <div class="section-heading">
+            <div>
+              <span class="eyebrow">Grab profile</span>
+              <h2>Video and subtitles</h2>
+            </div>
+            <i data-lucide="settings-2"></i>
+          </div>
+          <div class="toggle-stack">
+            <label class="toggle-label">
+              <input id="grab-video" type="checkbox" checked />
+              <span class="toggle"></span>
+              <span>
+                <strong>Download video</strong>
+                <small>Use best 1080p-or-lower media and remux to MP4.</small>
+              </span>
+            </label>
+            <label class="toggle-label">
+              <input id="grab-subtitles" type="checkbox" checked />
+              <span class="toggle"></span>
+              <span>
+                <strong>Download subtitles</strong>
+                <small>Save available manual or generated captions as SRT.</small>
+              </span>
+            </label>
+          </div>
+          <div class="subtitle-row">
+            <label>
+              <span>Subtitle languages</span>
+              <input id="grab-subtitle-languages" type="text" value="de,en" spellcheck="false" />
+            </label>
+          </div>
+        </section>
+
+        <section class="section-block run-block">
+          <div class="section-heading compact">
+            <div>
+              <span class="eyebrow">Run</span>
+              <h2 id="grabber-run-message">Paste a URL to begin</h2>
+            </div>
+          </div>
+          <div class="action-row">
+            <button id="grabber-start-button" class="primary-button" type="button">
+              <i data-lucide="play"></i>
+              <span>Start download</span>
+            </button>
+            <button id="grabber-stop-button" class="secondary-button" type="button" disabled>
+              <i data-lucide="square"></i>
+              <span>Cancel</span>
+            </button>
+          </div>
+          <p id="grabber-output-path" class="output-path"></p>
+        </section>
+      </div>
     </section>
 
     <aside class="side-panel">
@@ -268,22 +363,36 @@ createIcons({
 
 const dialogueTab = document.querySelector<HTMLButtonElement>("#dialogue-tab")!;
 const processingTab = document.querySelector<HTMLButtonElement>("#processing-tab")!;
+const grabberTab = document.querySelector<HTMLButtonElement>("#grabber-tab")!;
 const dialoguePanel = document.querySelector<HTMLElement>("#dialogue-panel")!;
 const processingPanel = document.querySelector<HTMLElement>("#processing-panel")!;
+const grabberPanel = document.querySelector<HTMLElement>("#grabber-panel")!;
 const dialogueVideoPath = document.querySelector<HTMLInputElement>("#dialogue-video-path")!;
 const processingVideoPath = document.querySelector<HTMLInputElement>("#processing-video-path")!;
+const grabUrl = document.querySelector<HTMLInputElement>("#grab-url")!;
+const grabOutputDir = document.querySelector<HTMLInputElement>("#grab-output-dir")!;
 const dialogueBrowseButton = document.querySelector<HTMLButtonElement>("#dialogue-browse-button")!;
 const processingBrowseButton = document.querySelector<HTMLButtonElement>("#processing-browse-button")!;
+const grabOutputBrowseButton = document.querySelector<HTMLButtonElement>(
+  "#grab-output-browse-button",
+)!;
 const dialogueStartButton = document.querySelector<HTMLButtonElement>("#dialogue-start-button")!;
 const processingStartButton = document.querySelector<HTMLButtonElement>("#processing-start-button")!;
+const grabberStartButton = document.querySelector<HTMLButtonElement>("#grabber-start-button")!;
 const dialogueStopButton = document.querySelector<HTMLButtonElement>("#dialogue-stop-button")!;
 const processingStopButton = document.querySelector<HTMLButtonElement>("#processing-stop-button")!;
+const grabberStopButton = document.querySelector<HTMLButtonElement>("#grabber-stop-button")!;
 const forceTranscribe = document.querySelector<HTMLInputElement>("#force-transcribe")!;
+const grabVideo = document.querySelector<HTMLInputElement>("#grab-video")!;
+const grabSubtitles = document.querySelector<HTMLInputElement>("#grab-subtitles")!;
+const grabSubtitleLanguages = document.querySelector<HTMLInputElement>("#grab-subtitle-languages")!;
 const statusChip = document.querySelector<HTMLElement>("#status-chip")!;
 const dialogueRunMessage = document.querySelector<HTMLElement>("#dialogue-run-message")!;
 const processingRunMessage = document.querySelector<HTMLElement>("#processing-run-message")!;
+const grabberRunMessage = document.querySelector<HTMLElement>("#grabber-run-message")!;
 const dialogueOutputPath = document.querySelector<HTMLElement>("#dialogue-output-path")!;
 const processingOutputPath = document.querySelector<HTMLElement>("#processing-output-path")!;
+const grabberOutputPath = document.querySelector<HTMLElement>("#grabber-output-path")!;
 const logOutput = document.querySelector<HTMLElement>("#log-output")!;
 const phaseList = document.querySelector<HTMLOListElement>("#phase-list")!;
 const runtimeChip = document.querySelector<HTMLElement>("#runtime-chip")!;
@@ -328,18 +437,23 @@ function setActiveWorkflow(workflow: Workflow) {
   activeWorkflow = workflow;
   dialogueTab.classList.toggle("active", workflow === "dialogue");
   processingTab.classList.toggle("active", workflow === "processing");
+  grabberTab.classList.toggle("active", workflow === "grabber");
   dialoguePanel.classList.toggle("active", workflow === "dialogue");
   processingPanel.classList.toggle("active", workflow === "processing");
+  grabberPanel.classList.toggle("active", workflow === "grabber");
   renderPhases();
 }
 
 function setRunControls(running: boolean) {
   dialogueStartButton.disabled = running;
   processingStartButton.disabled = running;
+  grabberStartButton.disabled = running;
   dialogueStopButton.disabled = !running;
   processingStopButton.disabled = !running;
+  grabberStopButton.disabled = !running;
   dialogueBrowseButton.disabled = running;
   processingBrowseButton.disabled = running;
+  grabOutputBrowseButton.disabled = running;
 }
 
 function workflowForStatus(): Workflow {
@@ -360,8 +474,18 @@ function setStatus(status: ConversionStatus) {
           ? "Running"
           : "Ready";
 
-  const runMessage = workflow === "dialogue" ? dialogueRunMessage : processingRunMessage;
-  const outputPath = workflow === "dialogue" ? dialogueOutputPath : processingOutputPath;
+  const runMessage =
+    workflow === "dialogue"
+      ? dialogueRunMessage
+      : workflow === "processing"
+        ? processingRunMessage
+        : grabberRunMessage;
+  const outputPath =
+    workflow === "dialogue"
+      ? dialogueOutputPath
+      : workflow === "processing"
+        ? processingOutputPath
+        : grabberOutputPath;
   runMessage.textContent = status.message;
   outputPath.textContent = status.outputPath ?? "";
   setRunControls(running);
@@ -413,12 +537,30 @@ async function chooseVideo(target: HTMLInputElement, workflow: Workflow) {
   }
 }
 
+async function chooseDirectory(target: HTMLInputElement) {
+  const selected = await open({
+    multiple: false,
+    directory: true,
+  });
+  if (typeof selected === "string") {
+    target.value = selected;
+    setActiveWorkflow("grabber");
+    setStatus({
+      status: "idle",
+      phase: "fetch",
+      message: "Ready to download",
+    });
+  }
+}
+
 dialogueTab.addEventListener("click", () => setActiveWorkflow("dialogue"));
 processingTab.addEventListener("click", () => setActiveWorkflow("processing"));
+grabberTab.addEventListener("click", () => setActiveWorkflow("grabber"));
 dialogueBrowseButton.addEventListener("click", () => chooseVideo(dialogueVideoPath, "dialogue"));
 processingBrowseButton.addEventListener("click", () =>
   chooseVideo(processingVideoPath, "processing"),
 );
+grabOutputBrowseButton.addEventListener("click", () => chooseDirectory(grabOutputDir));
 
 slowSpeed.addEventListener("input", () => updateSpeed(slowSpeed.value));
 slowSpeedRange.addEventListener("input", () => updateSpeed(slowSpeedRange.value));
@@ -473,6 +615,30 @@ processingStartButton.addEventListener("click", async () => {
   }
 });
 
+grabberStartButton.addEventListener("click", async () => {
+  setActiveWorkflow("grabber");
+  runningWorkflow = "grabber";
+  logOutput.textContent = "";
+  try {
+    const outputDir = await invoke<string>("start_grab", {
+      options: {
+        url: grabUrl.value.trim(),
+        outputDir: grabOutputDir.value.trim(),
+        downloadVideo: grabVideo.checked,
+        downloadSubtitles: grabSubtitles.checked,
+        subtitleLanguages: grabSubtitleLanguages.value.trim(),
+      },
+    });
+    grabberOutputPath.textContent = outputDir;
+  } catch (error) {
+    setStatus({
+      status: "error",
+      phase: "error",
+      message: String(error),
+    });
+  }
+});
+
 async function stopCurrentRun() {
   try {
     await invoke("stop_conversion");
@@ -484,6 +650,7 @@ async function stopCurrentRun() {
 
 dialogueStopButton.addEventListener("click", stopCurrentRun);
 processingStopButton.addEventListener("click", stopCurrentRun);
+grabberStopButton.addEventListener("click", stopCurrentRun);
 
 listen<ConversionLog>("conversion-log", ({ payload }) => appendLog(payload));
 listen<ConversionStatus>("conversion-state", ({ payload }) => setStatus(payload));

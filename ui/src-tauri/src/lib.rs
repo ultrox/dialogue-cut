@@ -23,6 +23,7 @@ const FFPROBE_SHA256: &str = "bb2db6f5d8cef919da12fbf592119a987202a8c060a886f3ca
 const FFPROBE_URL: &str =
     "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffprobe-darwin-arm64";
 const MLX_WHISPER_PACKAGE: &str = "mlx-whisper==0.4.3";
+const YT_DLP_PACKAGE: &str = "yt-dlp";
 
 #[derive(Default)]
 struct ConversionState {
@@ -48,6 +49,16 @@ struct ConversionOptions {
 struct SlowdownOptions {
     video_path: String,
     speed: f64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GrabOptions {
+    url: String,
+    output_dir: String,
+    download_video: bool,
+    download_subtitles: bool,
+    subtitle_languages: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -151,6 +162,15 @@ fn media_tools_ready(paths: &ProcessorPaths) -> bool {
     paths.tools_dir.join("ffmpeg").is_file() && paths.tools_dir.join("ffprobe").is_file()
 }
 
+fn yt_dlp_ready(paths: &ProcessorPaths) -> bool {
+    paths.python.is_file()
+        && Command::new(&paths.python)
+            .args(["-m", "yt_dlp", "--version"])
+            .env("PYTHONNOUSERSITE", "1")
+            .output()
+            .is_ok_and(|output| output.status.success())
+}
+
 fn local_runtime_ready(paths: &ProcessorPaths) -> bool {
     paths.python.is_file()
         && paths.script.is_file()
@@ -208,6 +228,10 @@ fn output_path_for_slowdown(video_path: &Path, speed: f64) -> Result<PathBuf, St
     Ok(video_path.with_file_name(format!("{stem}.slow-{speed:.2}x.mp4")))
 }
 
+fn output_template_for_grab(output_dir: &Path) -> PathBuf {
+    output_dir.join("%(title).200B [%(id)s].%(ext)s")
+}
+
 fn emit_status(
     app: &AppHandle,
     status: &str,
@@ -248,6 +272,15 @@ fn phase_for_line(line: &str) -> Option<(&'static str, &'static str)> {
         Some(("render", "Rendering QuickTime-safe segments"))
     } else if lower.contains("parts concat") {
         Some(("stitch", "Stitching the final MP4"))
+    } else if lower.contains("extracting url") || lower.contains("downloading webpage") {
+        Some(("fetch", "Fetching material metadata"))
+    } else if lower.contains("subtitles") || lower.contains(".srt") || lower.contains(".vtt") {
+        Some(("subtitles", "Saving subtitles"))
+    } else if lower.contains("[download]")
+        || lower.contains("merging formats")
+        || lower.contains("remuxing video")
+    {
+        Some(("download", "Downloading material"))
     } else {
         None
     }
@@ -540,6 +573,40 @@ fn install_whisper(
     }
 }
 
+fn install_yt_dlp(
+    app: &AppHandle,
+    state: &ConversionState,
+    paths: &ProcessorPaths,
+) -> Result<(), String> {
+    if yt_dlp_ready(paths) {
+        return Ok(());
+    }
+    if !python_has_pip(paths) {
+        emit_log(app, "stdout", "Installing pip into the private runtime...");
+        let mut command = Command::new(&paths.python);
+        command.args(["-m", "ensurepip", "--upgrade"]);
+        prepend_runtime_path(&mut command, paths);
+        run_logged_command(app, state, &mut command)?;
+    }
+    emit_log(app, "stdout", "Installing private yt-dlp downloader...");
+    let mut command = Command::new(&paths.python);
+    command.args([
+        "-m",
+        "pip",
+        "install",
+        "--disable-pip-version-check",
+        "--no-warn-script-location",
+        YT_DLP_PACKAGE,
+    ]);
+    prepend_runtime_path(&mut command, paths);
+    run_logged_command(app, state, &mut command)?;
+    if yt_dlp_ready(paths) {
+        Ok(())
+    } else {
+        Err("yt-dlp was not installed into the private runtime.".into())
+    }
+}
+
 fn ensure_private_runtime(
     app: &AppHandle,
     state: &ConversionState,
@@ -605,6 +672,36 @@ fn ensure_private_media_tools(
     }
 }
 
+fn ensure_private_download_tools(
+    app: &AppHandle,
+    state: &ConversionState,
+) -> Result<ProcessorPaths, String> {
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    return Err("This packaged build currently supports Apple Silicon Macs only.".into());
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        let paths = private_processor_paths(app)?;
+        if paths.python.is_file() && media_tools_ready(&paths) && yt_dlp_ready(&paths) {
+            return Ok(paths);
+        }
+
+        emit_status(app, "running", "setup", "Preparing downloader", None);
+        emit_runtime_status(
+            app,
+            false,
+            "Installing private downloader. First setup can take a few minutes.",
+        );
+        let data_dir = app_data_dir(app)?;
+        install_python(app, state, &paths, &data_dir)?;
+        install_static_tool(app, state, &paths, "ffmpeg", FFMPEG_URL, FFMPEG_SHA256)?;
+        install_static_tool(app, state, &paths, "ffprobe", FFPROBE_URL, FFPROBE_SHA256)?;
+        install_yt_dlp(app, state, &paths)?;
+        emit_runtime_status(app, true, "Private downloader is installed");
+        Ok(paths)
+    }
+}
+
 fn processor_paths(app: &AppHandle, state: &ConversionState) -> Result<ProcessorPaths, String> {
     let local = local_processor_paths();
     if cfg!(debug_assertions) && local_runtime_ready(&local) {
@@ -619,6 +716,31 @@ fn media_paths(app: &AppHandle, state: &ConversionState) -> Result<ProcessorPath
         return Ok(local);
     }
     ensure_private_media_tools(app, state)
+}
+
+enum DownloadRunner {
+    Binary {
+        binary: PathBuf,
+        paths: ProcessorPaths,
+    },
+    PythonModule {
+        paths: ProcessorPaths,
+    },
+}
+
+fn download_runner(app: &AppHandle, state: &ConversionState) -> Result<DownloadRunner, String> {
+    if cfg!(debug_assertions) {
+        if let Some(binary) = find_on_path("yt-dlp") {
+            return Ok(DownloadRunner::Binary {
+                binary,
+                paths: media_paths(app, state)?,
+            });
+        }
+    }
+
+    Ok(DownloadRunner::PythonModule {
+        paths: ensure_private_download_tools(app, state)?,
+    })
 }
 
 fn atempo_filter(speed: f64) -> String {
@@ -638,6 +760,67 @@ fn atempo_filter(speed: f64) -> String {
         .map(|factor| format!("atempo={factor:.5}"))
         .collect::<Vec<_>>()
         .join(",")
+}
+
+fn subtitle_language_spec(raw: &str) -> String {
+    let languages = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|language| !language.is_empty())
+        .map(|language| {
+            if language == "all" || language.contains('*') {
+                language.to_string()
+            } else {
+                format!("{language}.*")
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if languages.is_empty() {
+        "de.*,en.*".into()
+    } else {
+        languages.join(",")
+    }
+}
+
+fn add_grab_args(
+    command: &mut Command,
+    options: &GrabOptions,
+    output_template: &Path,
+    tools_dir: &Path,
+) {
+    command
+        .args([
+            "--newline",
+            "--no-playlist",
+            "--restrict-filenames",
+            "--windows-filenames",
+        ])
+        .arg("--ffmpeg-location")
+        .arg(tools_dir)
+        .arg("-o")
+        .arg(output_template);
+
+    if options.download_video {
+        command
+            .args(["-f", "bv*[height<=1080]+ba/b[height<=1080]/b"])
+            .args(["-S", "res:1080,vcodec:h264,acodec:m4a"])
+            .args(["--merge-output-format", "mp4"])
+            .args(["--remux-video", "mp4"]);
+    } else {
+        command.arg("--skip-download");
+    }
+
+    if options.download_subtitles {
+        let languages = subtitle_language_spec(&options.subtitle_languages);
+        command
+            .arg("--write-subs")
+            .arg("--write-auto-subs")
+            .args(["--sub-langs", &languages])
+            .args(["--convert-subs", "srt"]);
+    }
+
+    command.arg(options.url.trim());
 }
 
 fn run_conversion(
@@ -734,6 +917,42 @@ fn run_slowdown(
         .arg(output_path);
     prepend_media_path(&mut command, &paths);
     run_logged_command(app, state, &mut command)
+}
+
+fn run_grab(
+    app: &AppHandle,
+    state: &ConversionState,
+    options: &GrabOptions,
+    output_dir: &Path,
+) -> Result<(), String> {
+    fs::create_dir_all(output_dir)
+        .map_err(|error| format!("Could not create {}: {error}", output_dir.display()))?;
+    let output_template = output_template_for_grab(output_dir);
+    let runner = download_runner(app, state)?;
+
+    emit_status(
+        app,
+        "running",
+        "fetch",
+        "Fetching material metadata",
+        Some(output_dir),
+    );
+
+    match runner {
+        DownloadRunner::Binary { binary, paths } => {
+            let mut command = Command::new(binary);
+            add_grab_args(&mut command, options, &output_template, &paths.tools_dir);
+            prepend_media_path(&mut command, &paths);
+            run_logged_command(app, state, &mut command)
+        }
+        DownloadRunner::PythonModule { paths } => {
+            let mut command = Command::new(&paths.python);
+            command.args(["-m", "yt_dlp"]);
+            add_grab_args(&mut command, options, &output_template, &paths.tools_dir);
+            prepend_runtime_path(&mut command, &paths);
+            run_logged_command(app, state, &mut command)
+        }
+    }
 }
 
 #[tauri::command]
@@ -862,6 +1081,71 @@ fn start_slowdown(
 }
 
 #[tauri::command]
+fn start_grab(
+    app: AppHandle,
+    state: State<'_, ConversionState>,
+    options: GrabOptions,
+) -> Result<String, String> {
+    if state.running.swap(true, Ordering::SeqCst) {
+        return Err("A process is already running.".into());
+    }
+    state.cancel_requested.store(false, Ordering::SeqCst);
+
+    let url = options.url.trim();
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        state.running.store(false, Ordering::SeqCst);
+        return Err("Enter a valid http or https URL first.".into());
+    }
+    if !options.download_video && !options.download_subtitles {
+        state.running.store(false, Ordering::SeqCst);
+        return Err("Choose video, subtitles, or both.".into());
+    }
+    let output_dir = PathBuf::from(options.output_dir.trim());
+    if output_dir.as_os_str().is_empty() {
+        state.running.store(false, Ordering::SeqCst);
+        return Err("Choose an output folder first.".into());
+    }
+
+    emit_status(
+        &app,
+        "running",
+        "setup",
+        "Checking downloader tools",
+        Some(&output_dir),
+    );
+    let app_for_run = app.clone();
+    let output_for_run = output_dir.clone();
+    thread::spawn(move || {
+        let state = app_for_run.state::<ConversionState>();
+        let result = run_grab(&app_for_run, &state, &options, &output_for_run);
+        state.running.store(false, Ordering::SeqCst);
+        let _ = set_child_pid(&state, None);
+
+        match result {
+            Ok(()) => emit_status(
+                &app_for_run,
+                "complete",
+                "complete",
+                "Material is ready",
+                Some(&output_for_run),
+            ),
+            Err(error) => {
+                emit_log(&app_for_run, "stderr", &error);
+                emit_status(
+                    &app_for_run,
+                    "error",
+                    "error",
+                    &error,
+                    Some(&output_for_run),
+                );
+            }
+        }
+    });
+
+    Ok(output_dir.display().to_string())
+}
+
+#[tauri::command]
 fn stop_conversion(state: State<'_, ConversionState>) -> Result<(), String> {
     if !state.running.load(Ordering::SeqCst) {
         return Err("No conversion is running.".into());
@@ -883,6 +1167,7 @@ pub fn run() {
             get_runtime_status,
             start_conversion,
             start_slowdown,
+            start_grab,
             stop_conversion
         ])
         .run(tauri::generate_context!())

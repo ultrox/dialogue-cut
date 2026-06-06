@@ -7,6 +7,10 @@ MLX Whisper, then render a QuickTime-safe H.264/AAC MP4.
 It also includes a video-processing tab for slowing audio and video together,
 which is useful when preparing footage for dubbing practice.
 
+The desktop app also has a material-grabber tab that wraps `yt-dlp` for this
+workflow: paste one URL, choose an output folder, and download video plus
+German/English subtitles when the source exposes captions.
+
 Use it only with media you have the right to process.
 
 ## Desktop App
@@ -47,6 +51,17 @@ The output is written beside the source video:
 movie.slow-0.50x.mp4
 ```
 
+## Material Grabber
+
+In the desktop app, open `Material grabber`, paste a URL, choose a destination
+folder, and start the download. The app uses a fixed `yt-dlp` preset:
+
+- one URL at a time, no playlist expansion
+- best video at 1080p or lower
+- MP4 remux when possible
+- optional manual or generated subtitles converted to SRT
+- default subtitle languages: `de,en`
+
 ## Distribution
 
 Build an Apple Silicon macOS app and DMG:
@@ -57,9 +72,9 @@ npm run bundle:mac
 ```
 
 The packaged app installs a checksum-verified private Python runtime, static
-`ffmpeg`/`ffprobe`, and MLX Whisper dependencies on first use. Whisper model
-files download automatically on first transcription and stay cached in the
-app's Application Support directory.
+`ffmpeg`/`ffprobe`, MLX Whisper dependencies, and `yt-dlp` when needed.
+Whisper model files download automatically on first transcription and stay
+cached in the app's Application Support directory.
 
 Current packaged target: Apple Silicon Mac with macOS 13.5 or newer.
 
