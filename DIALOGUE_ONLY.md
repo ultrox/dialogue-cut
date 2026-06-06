@@ -53,7 +53,8 @@ The `Material grabber` tab wraps `yt-dlp` for one-URL downloads. Paste a URL
 and click `Start`. The app fetches metadata, then shows available video heights
 and exact subtitle language tracks. The output folder defaults to
 `~/Downloads/Dialogue Cut Material`, but can be changed. Select video,
-subtitles, or both, then click the same button after it changes to `Download`.
+subtitles, or both directly from those controls, then click the same button
+after it changes to `Download`. Choose `No video` for subtitle-only downloads.
 Subtitle files are converted to SRT.
 
 ### Shareable macOS app

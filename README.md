@@ -61,7 +61,7 @@ destination. The same button changes to `Download` after metadata is loaded.
 The app uses a fixed `yt-dlp` preset:
 
 - one URL at a time, no playlist expansion
-- selected quality cap, or best available
+- selected quality cap, best available, or `No video`
 - MP4 remux when possible
 - optional selected manual or generated subtitles converted to SRT
 - exact subtitle language keys from metadata, not wildcard language matching

@@ -323,34 +323,6 @@ app.innerHTML = `
           </div>
         </section>
 
-        <section class="section-block">
-          <div class="section-heading">
-            <div>
-              <span class="eyebrow">Grab profile</span>
-              <h2>Selected material</h2>
-            </div>
-            <i data-lucide="settings-2"></i>
-          </div>
-          <div class="toggle-stack">
-            <label class="toggle-label">
-              <input id="grab-video" type="checkbox" checked />
-              <span class="toggle"></span>
-              <span>
-                <strong>Download video</strong>
-                <small>Use the selected quality and remux to MP4.</small>
-              </span>
-            </label>
-            <label class="toggle-label">
-              <input id="grab-subtitles" type="checkbox" checked />
-              <span class="toggle"></span>
-              <span>
-                <strong>Download subtitles</strong>
-                <small>Save available manual or generated captions as SRT.</small>
-              </span>
-            </label>
-          </div>
-        </section>
-
       </div>
     </section>
 
@@ -412,8 +384,6 @@ const dialogueStopButton = document.querySelector<HTMLButtonElement>("#dialogue-
 const processingStopButton = document.querySelector<HTMLButtonElement>("#processing-stop-button")!;
 const grabberStopButton = document.querySelector<HTMLButtonElement>("#grabber-stop-button")!;
 const forceTranscribe = document.querySelector<HTMLInputElement>("#force-transcribe")!;
-const grabVideo = document.querySelector<HTMLInputElement>("#grab-video")!;
-const grabSubtitles = document.querySelector<HTMLInputElement>("#grab-subtitles")!;
 const grabberMetadataSection = document.querySelector<HTMLElement>("#grabber-metadata-section")!;
 const grabberTitle = document.querySelector<HTMLElement>("#grabber-title")!;
 const grabberMetaLine = document.querySelector<HTMLElement>("#grabber-meta-line")!;
@@ -557,28 +527,26 @@ function selectedSubtitleLanguages(): string[] {
     .filter(Boolean);
 }
 
+function shouldDownloadVideo(): boolean {
+  return grabQuality.value !== "none";
+}
+
 function canStartGrab(): boolean {
   if (!grabMetadata) {
     return false;
   }
-  if (!grabVideo.checked && !grabSubtitles.checked) {
-    return false;
-  }
-  if (grabSubtitles.checked && selectedSubtitleLanguages().length === 0) {
-    return false;
-  }
-  return true;
+  return shouldDownloadVideo() || selectedSubtitleLanguages().length > 0;
 }
 
 function applyGrabControlState(running = currentStatus.status === "running") {
   const hasMetadata = grabMetadata !== null;
   grabberActionLabel.textContent = hasMetadata ? "Download" : "Start";
   grabberStartButton.disabled = running || (!hasMetadata ? !grabUrl.value.trim() : !canStartGrab());
-  grabQuality.disabled = running || !hasMetadata || !grabVideo.checked;
+  grabQuality.disabled = running || !hasMetadata;
   grabSubtitleOptions
     .querySelectorAll<HTMLInputElement>("input[type='checkbox']")
     .forEach((input) => {
-      input.disabled = running || !hasMetadata || !grabSubtitles.checked;
+      input.disabled = running || !hasMetadata;
     });
 }
 
@@ -610,7 +578,11 @@ function renderGrabMetadata(metadata: GrabMetadata) {
   const detailParts = [metadata.extractor, formatDuration(metadata.duration)].filter(Boolean);
   grabberMetaLine.textContent = detailParts.join(" | ");
 
+  const noVideoOption = document.createElement("option");
+  noVideoOption.value = "none";
+  noVideoOption.textContent = "No video";
   grabQuality.replaceChildren(
+    noVideoOption,
     ...metadata.qualities.map((quality) => {
       const option = document.createElement("option");
       option.value = quality.value;
@@ -724,8 +696,6 @@ grabUrl.addEventListener("input", () => {
     message: grabUrl.value.trim() ? "Start to load options" : "Paste a URL to begin",
   });
 });
-grabVideo.addEventListener("change", () => applyGrabControlState());
-grabSubtitles.addEventListener("change", () => applyGrabControlState());
 grabQuality.addEventListener("change", () => applyGrabControlState());
 
 slowSpeed.addEventListener("input", () => updateSpeed(slowSpeed.value));
@@ -815,14 +785,17 @@ async function downloadGrabSelection() {
   runningWorkflow = "grabber";
   logOutput.textContent = "";
   try {
+    const subtitleLanguages = selectedSubtitleLanguages();
+    const downloadVideo = shouldDownloadVideo();
+    const downloadSubtitles = subtitleLanguages.length > 0;
     const outputDir = await invoke<string>("start_grab", {
       options: {
         url: grabUrl.value.trim(),
         outputDir: grabOutputDir.value.trim(),
-        downloadVideo: grabVideo.checked,
-        downloadSubtitles: grabSubtitles.checked,
+        downloadVideo,
+        downloadSubtitles,
         quality: grabQuality.value,
-        subtitleLanguages: selectedSubtitleLanguages().join(","),
+        subtitleLanguages: subtitleLanguages.join(","),
       },
     });
     grabberOutputPath.textContent = outputDir;
