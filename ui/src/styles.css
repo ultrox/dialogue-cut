@@ -469,6 +469,37 @@ input:focus {
   font-size: 12px;
 }
 
+.settings-details {
+  max-width: 760px;
+  margin-top: 12px;
+}
+
+.settings-details summary {
+  width: fit-content;
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: #5d6b66;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+  list-style: none;
+}
+
+.settings-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.settings-details summary svg {
+  width: 14px;
+  height: 14px;
+}
+
+.settings-details-body {
+  margin-top: 8px;
+}
+
 .subtitle-options {
   max-height: 180px;
   padding: 8px;

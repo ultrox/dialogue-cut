@@ -56,9 +56,9 @@ movie.slow-0.50x.mp4
 In the desktop app, open `Material grabber`, paste a URL, and click `Start`.
 The app asks `yt-dlp` for metadata first, then shows available video heights and
 exact subtitle language tracks. The output folder defaults to
-`~/Downloads/Dialogue Cut Material`; change it only when you want a different
-destination. The same button changes to `Download` after metadata is loaded.
-The app uses a fixed `yt-dlp` preset:
+`~/Downloads/Dialogue Cut Material`; change it from `Output settings` only
+when you want a different destination. The same button changes to `Download`
+after metadata is loaded. The app uses a fixed `yt-dlp` preset:
 
 - one URL at a time, no playlist expansion
 - selected quality cap, best available, or `No video`

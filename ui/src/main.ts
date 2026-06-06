@@ -283,23 +283,21 @@ app.innerHTML = `
             </button>
           </div>
           <p id="grabber-run-message" class="inline-status">Paste a URL to begin</p>
-        </section>
-
-        <section class="section-block source-block">
-          <div class="section-heading">
-            <div>
-              <span class="eyebrow">Destination</span>
-              <h2>Output folder</h2>
+          <details class="settings-details">
+            <summary>
+              <i data-lucide="settings-2"></i>
+              <span>Output settings</span>
+            </summary>
+            <div class="settings-details-body">
+              <div class="file-row">
+                <input id="grab-output-dir" type="text" placeholder="/path/to/material" spellcheck="false" />
+                <button id="grab-output-browse-button" class="icon-button" type="button" title="Choose folder">
+                  <i data-lucide="folder-open"></i>
+                </button>
+              </div>
+              <p id="grabber-output-path" class="output-path"></p>
             </div>
-            <i data-lucide="folder-open"></i>
-          </div>
-          <div class="file-row">
-            <input id="grab-output-dir" type="text" placeholder="/path/to/material" spellcheck="false" />
-            <button id="grab-output-browse-button" class="icon-button" type="button" title="Choose folder">
-              <i data-lucide="folder-open"></i>
-            </button>
-          </div>
-          <p id="grabber-output-path" class="output-path"></p>
+          </details>
         </section>
 
         <section id="grabber-metadata-section" class="section-block metadata-block" hidden>
