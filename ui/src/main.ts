@@ -640,10 +640,11 @@ function updateSpeed(value: string) {
   });
 }
 
-async function chooseVideo(target: HTMLInputElement, workflow: Workflow) {
+async function chooseVideo(target: HTMLInputElement, workflow: Workflow, defaultPath?: string) {
   const selected = await open({
     multiple: false,
     directory: false,
+    defaultPath: defaultPath || undefined,
     filters: [{ name: "Video", extensions: ["mkv", "mp4", "mov", "m4v", "webm"] }],
   });
   if (typeof selected === "string") {
@@ -679,7 +680,7 @@ processingTab.addEventListener("click", () => setActiveWorkflow("processing"));
 grabberTab.addEventListener("click", () => setActiveWorkflow("grabber"));
 dialogueBrowseButton.addEventListener("click", () => chooseVideo(dialogueVideoPath, "dialogue"));
 processingBrowseButton.addEventListener("click", () =>
-  chooseVideo(processingVideoPath, "processing"),
+  chooseVideo(processingVideoPath, "processing", grabOutputDir.value.trim()),
 );
 grabOutputBrowseButton.addEventListener("click", () => chooseDirectory());
 grabOutputDir.addEventListener("input", () => {
