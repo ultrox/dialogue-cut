@@ -10,6 +10,7 @@ import {
   HardDriveDownload,
   LoaderCircle,
   Play,
+  RefreshCw,
   Settings2,
   Square,
   Terminal,
@@ -56,6 +57,15 @@ type GrabMetadata = {
   subtitles: GrabSubtitleTrack[];
 };
 
+type MaterialVideo = {
+  path: string;
+  fileName: string;
+  duration?: number;
+  sizeBytes?: number;
+  modified?: number;
+  thumbnailDataUrl?: string;
+};
+
 const workflowPhases: Record<Workflow, readonly (readonly [string, string])[]> = {
   dialogue: [
     ["setup", "Prepare runtime"],
@@ -88,6 +98,7 @@ let currentStatus: ConversionStatus = {
   message: "Choose a movie file to begin",
 };
 let grabMetadata: GrabMetadata | null = null;
+let materialGalleryLoadId = 0;
 
 app.innerHTML = `
   <header class="app-header">
@@ -212,6 +223,21 @@ app.innerHTML = `
             <button id="processing-browse-button" class="icon-button" type="button" title="Choose video">
               <i data-lucide="folder-open"></i>
             </button>
+          </div>
+        </section>
+
+        <section class="section-block material-gallery-block">
+          <div class="section-heading">
+            <div>
+              <span class="eyebrow">Material</span>
+              <h2>Output folder videos</h2>
+            </div>
+            <button id="material-refresh-button" class="icon-button" type="button" title="Refresh videos">
+              <i data-lucide="refresh-cw"></i>
+            </button>
+          </div>
+          <div id="material-gallery" class="material-gallery">
+            <p class="empty-note">Loading videos...</p>
           </div>
         </section>
 
@@ -353,6 +379,7 @@ createIcons({
     HardDriveDownload,
     LoaderCircle,
     Play,
+    RefreshCw,
     Settings2,
     Square,
     Terminal,
@@ -378,6 +405,7 @@ const dialogueStartButton = document.querySelector<HTMLButtonElement>("#dialogue
 const processingStartButton = document.querySelector<HTMLButtonElement>("#processing-start-button")!;
 const grabberStartButton = document.querySelector<HTMLButtonElement>("#grabber-start-button")!;
 const grabberActionLabel = document.querySelector<HTMLElement>("#grabber-action-label")!;
+const materialRefreshButton = document.querySelector<HTMLButtonElement>("#material-refresh-button")!;
 const dialogueStopButton = document.querySelector<HTMLButtonElement>("#dialogue-stop-button")!;
 const processingStopButton = document.querySelector<HTMLButtonElement>("#processing-stop-button")!;
 const grabberStopButton = document.querySelector<HTMLButtonElement>("#grabber-stop-button")!;
@@ -394,6 +422,7 @@ const grabberRunMessage = document.querySelector<HTMLElement>("#grabber-run-mess
 const dialogueOutputPath = document.querySelector<HTMLElement>("#dialogue-output-path")!;
 const processingOutputPath = document.querySelector<HTMLElement>("#processing-output-path")!;
 const grabberOutputPath = document.querySelector<HTMLElement>("#grabber-output-path")!;
+const materialGallery = document.querySelector<HTMLElement>("#material-gallery")!;
 const logOutput = document.querySelector<HTMLElement>("#log-output")!;
 const phaseList = document.querySelector<HTMLOListElement>("#phase-list")!;
 const runtimeChip = document.querySelector<HTMLElement>("#runtime-chip")!;
@@ -454,6 +483,7 @@ function setRunControls(running: boolean) {
   dialogueBrowseButton.disabled = running;
   processingBrowseButton.disabled = running;
   grabOutputBrowseButton.disabled = running;
+  materialRefreshButton.disabled = running;
   applyGrabControlState(running);
 }
 
@@ -491,6 +521,9 @@ function setStatus(status: ConversionStatus) {
   outputPath.textContent = status.outputPath ?? (workflow === "grabber" ? grabOutputDir.value.trim() : "");
   setRunControls(running);
   renderPhases();
+  if (workflow === "grabber" && status.status === "complete" && status.message === "Material is ready") {
+    void loadMaterialGallery();
+  }
   if (!running) {
     runningWorkflow = null;
   }
@@ -515,6 +548,109 @@ function setGrabOutputDir(path: string) {
   grabOutputDir.value = path;
   grabberOutputPath.textContent = path;
   applyGrabControlState();
+  if (activeWorkflow === "processing") {
+    void loadMaterialGallery();
+  }
+}
+
+function selectProcessingVideo(path: string) {
+  processingVideoPath.value = path;
+  setActiveWorkflow("processing");
+  setStatus({
+    status: "idle",
+    phase: "inspect",
+    message: "Ready to transcode",
+  });
+  renderMaterialSelection();
+}
+
+function renderMaterialSelection() {
+  materialGallery
+    .querySelectorAll<HTMLButtonElement>(".video-card")
+    .forEach((button) => {
+      button.classList.toggle("active", button.dataset.path === processingVideoPath.value);
+    });
+}
+
+function renderMaterialGallery(videos: MaterialVideo[]) {
+  materialGallery.replaceChildren();
+  if (videos.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "empty-note";
+    empty.textContent = "No videos found in Output settings.";
+    materialGallery.append(empty);
+    return;
+  }
+
+  for (const video of videos) {
+    const button = document.createElement("button");
+    button.className = "video-card";
+    button.type = "button";
+    button.dataset.path = video.path;
+    button.addEventListener("click", () => selectProcessingVideo(video.path));
+
+    const thumb = document.createElement("span");
+    thumb.className = "video-thumb";
+    if (video.thumbnailDataUrl) {
+      const image = document.createElement("img");
+      image.src = video.thumbnailDataUrl;
+      image.alt = "";
+      thumb.append(image);
+    } else {
+      const fallback = document.createElement("i");
+      fallback.setAttribute("data-lucide", "film");
+      thumb.append(fallback);
+    }
+
+    const meta = document.createElement("span");
+    meta.className = "video-card-meta";
+    const name = document.createElement("strong");
+    name.textContent = video.fileName;
+    const duration = document.createElement("small");
+    duration.textContent = formatDuration(video.duration) ?? "Video";
+    meta.append(name, duration);
+    button.append(thumb, meta);
+    materialGallery.append(button);
+  }
+
+  createIcons({ icons: { Film } });
+  renderMaterialSelection();
+}
+
+async function loadMaterialGallery() {
+  if (currentStatus.status === "running") {
+    return;
+  }
+  const loadId = ++materialGalleryLoadId;
+  materialRefreshButton.disabled = true;
+  materialGallery.replaceChildren();
+  const loading = document.createElement("p");
+  loading.className = "empty-note";
+  loading.textContent = "Loading videos...";
+  materialGallery.append(loading);
+
+  try {
+    const videos = await invoke<MaterialVideo[]>("list_material_videos", {
+      options: {
+        directory: grabOutputDir.value.trim(),
+      },
+    });
+    if (loadId === materialGalleryLoadId) {
+      renderMaterialGallery(videos);
+    }
+  } catch (error) {
+    if (loadId !== materialGalleryLoadId) {
+      return;
+    }
+    const empty = document.createElement("p");
+    empty.className = "empty-note";
+    empty.textContent = String(error);
+    materialGallery.replaceChildren(empty);
+  } finally {
+    if (loadId === materialGalleryLoadId) {
+      materialRefreshButton.disabled = false;
+    }
+  }
 }
 
 function selectedSubtitleLanguages(): string[] {
@@ -649,6 +785,7 @@ async function chooseVideo(target: HTMLInputElement, workflow: Workflow, default
   });
   if (typeof selected === "string") {
     target.value = selected;
+    renderMaterialSelection();
     setActiveWorkflow(workflow);
     setStatus({
       status: "idle",
@@ -676,7 +813,10 @@ async function chooseDirectory() {
 }
 
 dialogueTab.addEventListener("click", () => setActiveWorkflow("dialogue"));
-processingTab.addEventListener("click", () => setActiveWorkflow("processing"));
+processingTab.addEventListener("click", () => {
+  setActiveWorkflow("processing");
+  void loadMaterialGallery();
+});
 grabberTab.addEventListener("click", () => setActiveWorkflow("grabber"));
 dialogueBrowseButton.addEventListener("click", () => chooseVideo(dialogueVideoPath, "dialogue"));
 processingBrowseButton.addEventListener("click", () =>
@@ -687,6 +827,8 @@ grabOutputDir.addEventListener("input", () => {
   grabberOutputPath.textContent = grabOutputDir.value.trim();
   applyGrabControlState();
 });
+grabOutputDir.addEventListener("change", () => void loadMaterialGallery());
+materialRefreshButton.addEventListener("click", () => void loadMaterialGallery());
 grabUrl.addEventListener("input", () => {
   resetGrabMetadata();
   setStatus({

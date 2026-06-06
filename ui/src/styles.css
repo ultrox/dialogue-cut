@@ -448,6 +448,68 @@ input:focus {
   background: #2f7464;
 }
 
+.material-gallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 10px;
+}
+
+.video-card {
+  min-width: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid #c8d2cd;
+  border-radius: 6px;
+  color: #1d2925;
+  background: #ffffff;
+  text-align: left;
+}
+
+.video-card.active {
+  border-color: #2f7464;
+  box-shadow: 0 0 0 3px rgba(47, 116, 100, 0.18);
+}
+
+.video-thumb {
+  aspect-ratio: 16 / 9;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  color: #7a8c85;
+  background: #e6ece8;
+}
+
+.video-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.video-thumb svg {
+  width: 26px;
+  height: 26px;
+}
+
+.video-card-meta {
+  min-height: 58px;
+  display: grid;
+  gap: 3px;
+  padding: 8px;
+}
+
+.video-card-meta strong {
+  overflow: hidden;
+  display: -webkit-box;
+  font-size: 12px;
+  line-height: 1.25;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.video-card-meta small {
+  font-size: 11px;
+}
+
 .metadata-grid {
   max-width: 720px;
   display: grid;

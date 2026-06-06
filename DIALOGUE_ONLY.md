@@ -47,7 +47,9 @@ the live process log.
 
 The `Video processing` tab creates slowed H.264/AAC MP4 files for dubbing
 practice. For example, `0.50x` doubles the duration while preserving audio pitch.
-Outputs are written beside the source video as `movie.slow-0.50x.mp4`.
+It shows a thumbnail gallery of videos from the Material grabber Output settings
+folder; click a thumbnail to select it. Outputs are written beside the source
+video as `movie.slow-0.50x.mp4`.
 
 The `Material grabber` tab wraps `yt-dlp` for one-URL downloads. Paste a URL
 and click `Start`. The app fetches metadata, then shows available video heights

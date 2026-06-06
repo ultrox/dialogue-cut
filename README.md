@@ -45,6 +45,9 @@ In the desktop app, open `Video processing`, choose a video, set the playback
 speed, and start the transcode. A `0.50x` output is twice as long as the input.
 Audio is slowed with ffmpeg `atempo`, so pitch is preserved.
 
+The tab also shows a thumbnail gallery of videos from the Material grabber
+Output settings folder. Click a thumbnail to select that video for slow-down.
+
 The output is written beside the source video:
 
 ```txt

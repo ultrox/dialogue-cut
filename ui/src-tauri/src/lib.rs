@@ -10,6 +10,7 @@ use std::{
         Mutex,
     },
     thread,
+    time::UNIX_EPOCH,
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -94,6 +95,23 @@ struct GrabMetadata {
     duration: Option<f64>,
     qualities: Vec<GrabQuality>,
     subtitles: Vec<GrabSubtitleTrack>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MaterialGalleryOptions {
+    directory: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MaterialVideo {
+    path: String,
+    file_name: String,
+    duration: Option<f64>,
+    size_bytes: Option<u64>,
+    modified: Option<u64>,
+    thumbnail_data_url: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -269,6 +287,51 @@ fn output_template_for_grab(output_dir: &Path) -> PathBuf {
 
 fn default_grab_output_dir() -> PathBuf {
     dirs_home().join("Downloads").join("Dialogue Cut Material")
+}
+
+fn is_supported_video(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "mkv" | "mp4" | "mov" | "m4v" | "webm"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn modified_seconds(path: &Path) -> Option<u64> {
+    fs::metadata(path)
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs())
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let first = chunk[0];
+        let second = *chunk.get(1).unwrap_or(&0);
+        let third = *chunk.get(2).unwrap_or(&0);
+        let combined = ((first as u32) << 16) | ((second as u32) << 8) | third as u32;
+
+        encoded.push(TABLE[((combined >> 18) & 0x3f) as usize] as char);
+        encoded.push(TABLE[((combined >> 12) & 0x3f) as usize] as char);
+        if chunk.len() > 1 {
+            encoded.push(TABLE[((combined >> 6) & 0x3f) as usize] as char);
+        } else {
+            encoded.push('=');
+        }
+        if chunk.len() > 2 {
+            encoded.push(TABLE[(combined & 0x3f) as usize] as char);
+        } else {
+            encoded.push('=');
+        }
+    }
+    encoded
 }
 
 fn emit_status(
@@ -1052,6 +1115,116 @@ fn probe_grab_inner(
     parse_grab_metadata(&stdout)
 }
 
+fn video_duration(ffprobe: &Path, video_path: &Path) -> Option<f64> {
+    let output = Command::new(ffprobe)
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=nokey=1:noprint_wrappers=1",
+        ])
+        .arg(video_path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<f64>()
+        .ok()
+}
+
+fn thumbnail_data_url(ffmpeg: &Path, video_path: &Path, duration: Option<f64>) -> Option<String> {
+    let seek = duration
+        .filter(|duration| *duration > 8.0)
+        .map(|duration| (duration * 0.08).clamp(1.0, 30.0))
+        .unwrap_or(1.0);
+    let seek = format!("{seek:.3}");
+    let output = Command::new(ffmpeg)
+        .args(["-hide_banner", "-loglevel", "error", "-ss", &seek, "-i"])
+        .arg(video_path)
+        .args([
+            "-frames:v",
+            "1",
+            "-vf",
+            "scale=320:-1",
+            "-f",
+            "image2pipe",
+            "-vcodec",
+            "mjpeg",
+            "-q:v",
+            "5",
+            "pipe:1",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() || output.stdout.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "data:image/jpeg;base64,{}",
+        base64_encode(&output.stdout)
+    ))
+}
+
+fn list_material_videos_inner(
+    app: &AppHandle,
+    state: &ConversionState,
+    directory: &Path,
+) -> Result<Vec<MaterialVideo>, String> {
+    fs::create_dir_all(directory)
+        .map_err(|error| format!("Could not create {}: {error}", directory.display()))?;
+
+    let mut files = fs::read_dir(directory)
+        .map_err(|error| format!("Could not read {}: {error}", directory.display()))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file() && is_supported_video(path))
+        .collect::<Vec<_>>();
+    files.sort_by_key(|path| std::cmp::Reverse(modified_seconds(path).unwrap_or(0)));
+    files.truncate(48);
+
+    let media = match media_paths(app, state) {
+        Ok(paths) => Some(paths),
+        Err(error) => {
+            emit_log(
+                app,
+                "stderr",
+                format!("Gallery thumbnails unavailable: {error}"),
+            );
+            None
+        }
+    };
+
+    Ok(files
+        .into_iter()
+        .map(|path| {
+            let metadata = fs::metadata(&path).ok();
+            let duration = media
+                .as_ref()
+                .and_then(|paths| video_duration(&paths.tools_dir.join("ffprobe"), &path));
+            let thumbnail_data_url = media.as_ref().and_then(|paths| {
+                thumbnail_data_url(&paths.tools_dir.join("ffmpeg"), &path, duration)
+            });
+            MaterialVideo {
+                file_name: path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("video")
+                    .to_string(),
+                path: path.display().to_string(),
+                duration,
+                size_bytes: metadata.as_ref().map(|metadata| metadata.len()),
+                modified: modified_seconds(&path),
+                thumbnail_data_url,
+            }
+        })
+        .collect())
+}
+
 fn run_conversion(
     app: &AppHandle,
     state: &ConversionState,
@@ -1322,6 +1495,20 @@ fn get_default_grab_output_dir() -> Result<String, String> {
 }
 
 #[tauri::command]
+fn list_material_videos(
+    app: AppHandle,
+    state: State<'_, ConversionState>,
+    options: MaterialGalleryOptions,
+) -> Result<Vec<MaterialVideo>, String> {
+    let directory = if options.directory.trim().is_empty() {
+        default_grab_output_dir()
+    } else {
+        PathBuf::from(options.directory.trim())
+    };
+    list_material_videos_inner(&app, &state, &directory)
+}
+
+#[tauri::command]
 fn probe_grab(
     app: AppHandle,
     state: State<'_, ConversionState>,
@@ -1447,6 +1634,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_runtime_status,
             get_default_grab_output_dir,
+            list_material_videos,
             start_conversion,
             start_slowdown,
             probe_grab,
