@@ -117,6 +117,7 @@ type ReviewPreviewState = "idle" | "preparing" | "ready" | "error";
 const workflowPhases: Record<Workflow, readonly (readonly [string, string])[]> = {
   dialogue: [
     ["setup", "Prepare runtime"],
+    ["prepare", "Normalize source"],
     ["inspect", "Inspect source"],
     ["extract", "Extract audio"],
     ["transcribe", "Transcribe German"],
@@ -769,8 +770,8 @@ function setStatus(status: ConversionStatus) {
   if (workflow === "review" && status.phase === "preview") {
     if (status.status === "running") {
       setReviewPreviewState("preparing", status.message);
-    } else if (status.status === "complete" && status.outputPath) {
-      setReviewVideoSource(status.outputPath);
+    } else if (status.status === "complete") {
+      reviewPreviewOverlay.textContent = status.message;
     } else if (status.status === "error") {
       setReviewPreviewState("error", status.message);
     }
@@ -1205,7 +1206,7 @@ function renderReviewSelection() {
     !reviewProject || running || reviewPreviewState === "preparing" || reviewPreviewState === "ready";
   reviewPrevButton.disabled = !reviewProject || selectedSegmentIndex <= 0;
   reviewNextButton.disabled = !reviewProject || selectedSegmentIndex >= (reviewProject?.segments.length ?? 0) - 1;
-  reviewPreviewButton.disabled = !hasSegment || !reviewPreviewReady;
+  reviewPreviewButton.disabled = !hasSegment || running || reviewPreviewState === "preparing";
   reviewPlayCutButton.disabled = !reviewPreviewReady || enabledSegmentIndices().length === 0;
   reviewStartInput.disabled = !hasSegment || running;
   reviewEndInput.disabled = !hasSegment || running;
@@ -1339,9 +1340,10 @@ async function prepareReviewPreview() {
   setReviewPreviewState("preparing", "Preparing browser-safe preview...");
   setRunControls(true);
   try {
-    await invoke<string>("start_review_proxy", {
+    const previewPath = await invoke<string>("start_review_proxy", {
       options: { projectPath: reviewProjectPathValue },
     });
+    setReviewVideoSource(previewPath);
   } catch (error) {
     setReviewPreviewState("error", String(error));
     setStatus({
@@ -1375,21 +1377,18 @@ async function loadReviewProject() {
     } else {
       reviewVideo.removeAttribute("src");
       reviewVideo.load();
-      setReviewPreviewState("preparing", "Preparing browser-safe preview...");
+      setReviewPreviewState("idle", "Project source is not browser-playable. Rerun Dialogue cut or prepare preview.");
     }
     setReviewDirty(false);
     setStatus({
       status: "idle",
       phase: "render",
-      message: data.previewReady ? "Project loaded" : "Project loaded, preparing preview",
+      message: data.previewReady ? "Project loaded" : "Project loaded without playable source",
       outputPath: data.outputPath,
     });
     renderReview();
     if (selectedSegmentIndex >= 0) {
       selectReviewSegment(selectedSegmentIndex);
-    }
-    if (!data.previewReady) {
-      void prepareReviewPreview();
     }
   } catch (error) {
     setStatus({

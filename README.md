@@ -1,8 +1,9 @@
 # Dialogue Cut
 
-Dialogue Cut creates reviewable dialogue-only cuts from local video files. It can
-use embedded subtitles when they are useful, or generate German timestamps with
-MLX Whisper, then render a QuickTime-safe H.264/AAC MP4.
+Dialogue Cut creates reviewable dialogue-only cuts from local video files. The
+desktop conversion first normalizes non-browser-playable sources into a
+`*.dialogue-source.mp4` H.264/AAC MP4, then uses that file for transcription,
+segment project creation, review playback, and final rendering.
 
 It also includes a video-processing tab for slowing audio and video together,
 which is useful when preparing footage for dubbing practice.
@@ -12,13 +13,10 @@ workflow: paste one URL, click `Start`, then choose video quality and exact
 subtitle tracks before the same button changes to `Download`.
 
 After an automatic cut, the Segment review tab can load the generated
-`.dialogue-project.json`, play the original movie, preview the kept cut by
+`.dialogue-project.json`, play the normalized source movie, preview the kept cut by
 skipping between enabled segments, trim segment starts/ends, split a segment at
 the playhead, drop or restore segments, and save the adjusted project before
-rendering a reviewed MP4. For reliable in-app playback of MKV/x265/AV1 sources,
-the tab creates a browser-safe `*.dialogue-preview.mp4` proxy the first time a
-project is loaded. Large MKV/x265/AV1 movies can take several minutes on the
-first preview build; the review player shows that preparation state explicitly.
+rendering a reviewed MP4.
 
 Use it only with media you have the right to process.
 
