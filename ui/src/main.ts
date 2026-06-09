@@ -112,6 +112,8 @@ type ReviewProjectData = {
   project: ReviewProject;
 };
 
+type ReviewPreviewState = "idle" | "preparing" | "ready" | "error";
+
 const workflowPhases: Record<Workflow, readonly (readonly [string, string])[]> = {
   dialogue: [
     ["setup", "Prepare runtime"],
@@ -155,6 +157,7 @@ let reviewProject: ReviewProject | null = null;
 let reviewProjectPathValue = "";
 let reviewOutputPathValue = "";
 let reviewPreviewReady = false;
+let reviewPreviewState: ReviewPreviewState = "idle";
 let selectedSegmentIndex = -1;
 let reviewDirty = false;
 let reviewPlaybackMode: "idle" | "segment" | "cut" = "idle";
@@ -319,8 +322,15 @@ app.innerHTML = `
           </div>
           <div class="review-grid">
             <div class="review-player-pane">
-              <video id="review-video" class="review-video" controls preload="metadata"></video>
+              <div class="review-video-shell">
+                <video id="review-video" class="review-video" controls preload="metadata"></video>
+                <div id="review-preview-overlay" class="review-preview-overlay">Load a project to prepare preview</div>
+              </div>
               <div class="review-player-actions">
+                <button id="review-prepare-preview-button" class="secondary-button" type="button" disabled>
+                  <i data-lucide="refresh-cw"></i>
+                  <span>Prepare preview</span>
+                </button>
                 <button id="review-prev-button" class="secondary-button" type="button" disabled>
                   <i data-lucide="skip-back"></i>
                   <span>Previous</span>
@@ -617,8 +627,12 @@ const processingOutputPath = document.querySelector<HTMLElement>("#processing-ou
 const grabberOutputPath = document.querySelector<HTMLElement>("#grabber-output-path")!;
 const materialGallery = document.querySelector<HTMLElement>("#material-gallery")!;
 const reviewVideo = document.querySelector<HTMLVideoElement>("#review-video")!;
+const reviewPreviewOverlay = document.querySelector<HTMLElement>("#review-preview-overlay")!;
 const reviewSelectionTitle = document.querySelector<HTMLElement>("#review-selection-title")!;
 const reviewDirtyChip = document.querySelector<HTMLElement>("#review-dirty-chip")!;
+const reviewPreparePreviewButton = document.querySelector<HTMLButtonElement>(
+  "#review-prepare-preview-button",
+)!;
 const reviewPrevButton = document.querySelector<HTMLButtonElement>("#review-prev-button")!;
 const reviewPreviewButton = document.querySelector<HTMLButtonElement>("#review-preview-button")!;
 const reviewPlayCutButton = document.querySelector<HTMLButtonElement>("#review-play-cut-button")!;
@@ -704,6 +718,8 @@ function setRunControls(running: boolean) {
   reviewLoadButton.disabled = running;
   reviewRenderButton.disabled = running || !reviewProject || reviewDirty;
   reviewSaveButton.disabled = running || !reviewProject || !reviewDirty;
+  reviewPreparePreviewButton.disabled =
+    running || !reviewProject || reviewPreviewState === "preparing" || reviewPreviewState === "ready";
   processingStartButton.disabled = running;
   dialogueStopButton.disabled = !running;
   reviewStopButton.disabled = !running;
@@ -750,10 +766,16 @@ function setStatus(status: ConversionStatus) {
 
   const { runMessage, outputPath } = workflowStatusElements(workflow);
   runMessage.textContent = status.message;
-  if (workflow === "review" && status.phase === "preview" && status.outputPath) {
-    if (status.status === "complete") {
+  if (workflow === "review" && status.phase === "preview") {
+    if (status.status === "running") {
+      setReviewPreviewState("preparing", status.message);
+    } else if (status.status === "complete" && status.outputPath) {
       setReviewVideoSource(status.outputPath);
+    } else if (status.status === "error") {
+      setReviewPreviewState("error", status.message);
     }
+  } else if (workflow === "review" && status.status === "error" && reviewPreviewState === "preparing") {
+    setReviewPreviewState("error", status.message);
   }
   const displayedOutput =
     workflow === "review" && status.phase === "preview"
@@ -1052,8 +1074,29 @@ function setReviewMessage(message: string) {
   reviewRunMessage.textContent = message;
 }
 
+function setReviewPreviewState(state: ReviewPreviewState, message?: string) {
+  reviewPreviewState = state;
+  reviewPreviewReady = state === "ready";
+  reviewPreviewOverlay.hidden = state === "ready";
+  reviewPreviewOverlay.textContent =
+    message ??
+    (state === "preparing"
+      ? "Preparing browser-safe preview..."
+      : state === "error"
+        ? "Preview failed. Check the process log, then retry."
+        : state === "idle"
+          ? "Load a project to prepare preview"
+          : "");
+  reviewPreparePreviewButton.disabled =
+    !reviewProject || currentStatus.status === "running" || state === "preparing" || state === "ready";
+  const label = reviewPreparePreviewButton.querySelector("span");
+  if (label) {
+    label.textContent = state === "error" ? "Retry preview" : "Prepare preview";
+  }
+}
+
 function setReviewVideoSource(path: string) {
-  reviewPreviewReady = true;
+  setReviewPreviewState("ready");
   reviewVideo.src = convertFileSrc(path);
   reviewVideo.load();
   reviewVideo.addEventListener(
@@ -1158,6 +1201,8 @@ function renderReviewSelection() {
   const segment = selectedSegment();
   const hasSegment = Boolean(segment);
   const running = currentStatus.status === "running";
+  reviewPreparePreviewButton.disabled =
+    !reviewProject || running || reviewPreviewState === "preparing" || reviewPreviewState === "ready";
   reviewPrevButton.disabled = !reviewProject || selectedSegmentIndex <= 0;
   reviewNextButton.disabled = !reviewProject || selectedSegmentIndex >= (reviewProject?.segments.length ?? 0) - 1;
   reviewPreviewButton.disabled = !hasSegment || !reviewPreviewReady;
@@ -1291,11 +1336,14 @@ async function prepareReviewPreview() {
     return;
   }
   runningWorkflow = "review";
+  setReviewPreviewState("preparing", "Preparing browser-safe preview...");
+  setRunControls(true);
   try {
     await invoke<string>("start_review_proxy", {
       options: { projectPath: reviewProjectPathValue },
     });
   } catch (error) {
+    setReviewPreviewState("error", String(error));
     setStatus({
       status: "error",
       phase: "error",
@@ -1327,6 +1375,7 @@ async function loadReviewProject() {
     } else {
       reviewVideo.removeAttribute("src");
       reviewVideo.load();
+      setReviewPreviewState("preparing", "Preparing browser-safe preview...");
     }
     setReviewDirty(false);
     setStatus({
@@ -1614,17 +1663,18 @@ reviewProjectPath.addEventListener("input", () => {
   if (reviewProjectPath.value.trim() !== reviewProjectPathValue) {
     reviewProject = null;
     selectedSegmentIndex = -1;
-    reviewPreviewReady = false;
     reviewOutputPathValue = "";
     reviewOutputPath.textContent = "";
     reviewVideo.removeAttribute("src");
     reviewVideo.load();
+    setReviewPreviewState("idle", "Load the selected project to prepare preview");
     setReviewDirty(false);
     setReviewMessage(reviewProjectPath.value.trim() ? "Load the selected project" : "Choose a dialogue project JSON");
     renderReview();
   }
 });
 reviewSaveButton.addEventListener("click", () => void saveReviewProject());
+reviewPreparePreviewButton.addEventListener("click", () => void prepareReviewPreview());
 reviewPrevButton.addEventListener("click", () => selectReviewSegment(selectedSegmentIndex - 1));
 reviewNextButton.addEventListener("click", () => selectReviewSegment(selectedSegmentIndex + 1));
 reviewPreviewButton.addEventListener("click", () => playReviewSegment());
@@ -1656,6 +1706,12 @@ reviewSplitButton.addEventListener("click", () => splitSelectedSegment());
 reviewVideo.addEventListener("timeupdate", () => handleReviewPlayback());
 reviewVideo.addEventListener("pause", () => {
   reviewPlaybackMode = "idle";
+});
+reviewVideo.addEventListener("error", () => {
+  if (reviewVideo.currentSrc) {
+    setReviewPreviewState("error", "Preview file could not be played. Retry preview.");
+    renderReview();
+  }
 });
 
 dialogueStartButton.addEventListener("click", async () => {

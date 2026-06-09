@@ -648,13 +648,32 @@ input:focus {
   gap: 18px;
 }
 
+.review-video-shell {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid #c8d2cd;
+  border-radius: 6px;
+  background: #111816;
+}
+
 .review-video {
   width: 100%;
   aspect-ratio: 16 / 9;
   display: block;
-  border: 1px solid #c8d2cd;
-  border-radius: 6px;
   background: #111816;
+}
+
+.review-preview-overlay {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  color: #dfe9e5;
+  background: rgba(17, 24, 22, 0.86);
+  font-size: 13px;
+  font-weight: 800;
+  text-align: center;
 }
 
 .review-player-actions {

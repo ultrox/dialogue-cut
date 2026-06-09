@@ -1545,6 +1545,7 @@ fn run_review_proxy(
         "Preparing browser-safe preview",
         Some(proxy_path),
     );
+    emit_log(app, "stdout", "Using software H.264 preview encoder.");
     let mut command = Command::new(ffmpeg);
     command
         .arg("-hide_banner")
@@ -1554,10 +1555,10 @@ fn run_review_proxy(
         .args(["-map", "0:v:0"])
         .args(["-map", "0:a:0?"])
         .arg("-sn")
-        .args(["-vf", "scale=-2:540,format=yuv420p"])
+        .args(["-vf", "scale=-2:360,format=yuv420p"])
         .args(["-c:v", "libx264"])
-        .args(["-preset", "veryfast"])
-        .args(["-crf", "28"])
+        .args(["-preset", "ultrafast"])
+        .args(["-crf", "30"])
         .args(["-c:a", "aac"])
         .args(["-b:a", "128k"])
         .args(["-movflags", "+faststart"])
