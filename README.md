@@ -15,7 +15,9 @@ After an automatic cut, the Segment review tab can load the generated
 `.dialogue-project.json`, play the original movie, preview the kept cut by
 skipping between enabled segments, trim segment starts/ends, split a segment at
 the playhead, drop or restore segments, and save the adjusted project before
-rendering a reviewed MP4.
+rendering a reviewed MP4. For reliable in-app playback of MKV/x265/AV1 sources,
+the tab creates a browser-safe `*.dialogue-preview.mp4` proxy the first time a
+project is loaded.
 
 Use it only with media you have the right to process.
 

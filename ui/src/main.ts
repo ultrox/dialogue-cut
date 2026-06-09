@@ -106,6 +106,8 @@ type ReviewProject = {
 type ReviewProjectData = {
   projectPath: string;
   videoPath: string;
+  previewPath: string;
+  previewReady: boolean;
   outputPath: string;
   project: ReviewProject;
 };
@@ -122,6 +124,7 @@ const workflowPhases: Record<Workflow, readonly (readonly [string, string])[]> =
   ],
   review: [
     ["setup", "Prepare tools"],
+    ["preview", "Prepare preview"],
     ["render", "Render edited cut"],
     ["stitch", "Stitch MP4"],
   ],
@@ -151,6 +154,7 @@ let materialGalleryLoadId = 0;
 let reviewProject: ReviewProject | null = null;
 let reviewProjectPathValue = "";
 let reviewOutputPathValue = "";
+let reviewPreviewReady = false;
 let selectedSegmentIndex = -1;
 let reviewDirty = false;
 let reviewPlaybackMode: "idle" | "segment" | "cut" = "idle";
@@ -746,7 +750,16 @@ function setStatus(status: ConversionStatus) {
 
   const { runMessage, outputPath } = workflowStatusElements(workflow);
   runMessage.textContent = status.message;
-  outputPath.textContent = status.outputPath ?? (workflow === "grabber" ? grabOutputDir.value.trim() : "");
+  if (workflow === "review" && status.phase === "preview" && status.outputPath) {
+    if (status.status === "complete") {
+      setReviewVideoSource(status.outputPath);
+    }
+  }
+  const displayedOutput =
+    workflow === "review" && status.phase === "preview"
+      ? reviewOutputPathValue
+      : status.outputPath ?? (workflow === "grabber" ? grabOutputDir.value.trim() : "");
+  outputPath.textContent = displayedOutput;
   setRunControls(running);
   renderPhases();
   if (workflow === "grabber" && status.status === "complete" && status.message === "Material is ready") {
@@ -1039,6 +1052,23 @@ function setReviewMessage(message: string) {
   reviewRunMessage.textContent = message;
 }
 
+function setReviewVideoSource(path: string) {
+  reviewPreviewReady = true;
+  reviewVideo.src = convertFileSrc(path);
+  reviewVideo.load();
+  reviewVideo.addEventListener(
+    "loadedmetadata",
+    () => {
+      const segment = selectedSegment();
+      if (segment) {
+        reviewVideo.currentTime = segment.start;
+      }
+    },
+    { once: true },
+  );
+  renderReview();
+}
+
 function renderReviewStats() {
   const segments = reviewProject?.segments ?? [];
   const kept = segments.filter(isSegmentEnabled);
@@ -1130,8 +1160,8 @@ function renderReviewSelection() {
   const running = currentStatus.status === "running";
   reviewPrevButton.disabled = !reviewProject || selectedSegmentIndex <= 0;
   reviewNextButton.disabled = !reviewProject || selectedSegmentIndex >= (reviewProject?.segments.length ?? 0) - 1;
-  reviewPreviewButton.disabled = !hasSegment;
-  reviewPlayCutButton.disabled = enabledSegmentIndices().length === 0;
+  reviewPreviewButton.disabled = !hasSegment || !reviewPreviewReady;
+  reviewPlayCutButton.disabled = !reviewPreviewReady || enabledSegmentIndices().length === 0;
   reviewStartInput.disabled = !hasSegment || running;
   reviewEndInput.disabled = !hasSegment || running;
   reviewSetStartButton.disabled = !hasSegment || running;
@@ -1177,7 +1207,7 @@ function selectReviewSegment(index: number, seek = true) {
   }
   selectedSegmentIndex = Math.min(Math.max(index, 0), reviewProject.segments.length - 1);
   const segment = selectedSegment();
-  if (seek && segment) {
+  if (seek && segment && reviewPreviewReady) {
     reviewPlaybackMode = "idle";
     reviewVideo.currentTime = segment.start;
   }
@@ -1256,6 +1286,24 @@ function firstReviewSegmentIndex(project: ReviewProject): number {
   return kept >= 0 ? kept : project.segments.length > 0 ? 0 : -1;
 }
 
+async function prepareReviewPreview() {
+  if (!reviewProjectPathValue) {
+    return;
+  }
+  runningWorkflow = "review";
+  try {
+    await invoke<string>("start_review_proxy", {
+      options: { projectPath: reviewProjectPathValue },
+    });
+  } catch (error) {
+    setStatus({
+      status: "error",
+      phase: "error",
+      message: String(error),
+    });
+  }
+}
+
 async function loadReviewProject() {
   const path = reviewProjectPath.value.trim();
   if (!path) {
@@ -1270,20 +1318,29 @@ async function loadReviewProject() {
     reviewProject = data.project;
     reviewProjectPathValue = data.projectPath;
     reviewOutputPathValue = data.outputPath;
+    reviewPreviewReady = data.previewReady;
     reviewProjectPath.value = data.projectPath;
     reviewOutputPath.textContent = data.outputPath;
-    reviewVideo.src = convertFileSrc(data.videoPath);
     selectedSegmentIndex = firstReviewSegmentIndex(data.project);
+    if (data.previewReady) {
+      setReviewVideoSource(data.previewPath);
+    } else {
+      reviewVideo.removeAttribute("src");
+      reviewVideo.load();
+    }
     setReviewDirty(false);
     setStatus({
       status: "idle",
       phase: "render",
-      message: "Project loaded",
+      message: data.previewReady ? "Project loaded" : "Project loaded, preparing preview",
       outputPath: data.outputPath,
     });
     renderReview();
     if (selectedSegmentIndex >= 0) {
       selectReviewSegment(selectedSegmentIndex);
+    }
+    if (!data.previewReady) {
+      void prepareReviewPreview();
     }
   } catch (error) {
     setStatus({
@@ -1334,12 +1391,20 @@ function playReviewSegment() {
   if (!segment) {
     return;
   }
+  if (!reviewPreviewReady) {
+    setReviewMessage("Preview is still being prepared.");
+    return;
+  }
   reviewPlaybackMode = "segment";
   reviewVideo.currentTime = segment.start;
   void reviewVideo.play();
 }
 
 function playReviewCut() {
+  if (!reviewPreviewReady) {
+    setReviewMessage("Preview is still being prepared.");
+    return;
+  }
   const nextIndex = nearestEnabledSegmentIndex(selectedSegmentIndex < 0 ? 0 : selectedSegmentIndex);
   if (nextIndex < 0) {
     return;
@@ -1549,6 +1614,8 @@ reviewProjectPath.addEventListener("input", () => {
   if (reviewProjectPath.value.trim() !== reviewProjectPathValue) {
     reviewProject = null;
     selectedSegmentIndex = -1;
+    reviewPreviewReady = false;
+    reviewOutputPathValue = "";
     reviewOutputPath.textContent = "";
     reviewVideo.removeAttribute("src");
     reviewVideo.load();

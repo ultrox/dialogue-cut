@@ -122,6 +122,12 @@ struct ReviewProjectOptions {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ReviewProxyOptions {
+    project_path: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SaveReviewProjectOptions {
     project_path: String,
     project: serde_json::Value,
@@ -139,6 +145,8 @@ struct RenderReviewProjectOptions {
 struct ReviewProjectData {
     project_path: String,
     video_path: String,
+    preview_path: String,
+    preview_ready: bool,
     output_path: String,
     project: serde_json::Value,
 }
@@ -318,6 +326,14 @@ fn reviewed_output_path_for(video_path: &Path) -> Result<PathBuf, String> {
     Ok(video_path.with_file_name(format!("{stem}.dialogue-only.reviewed.mp4")))
 }
 
+fn preview_proxy_path_for(video_path: &Path) -> Result<PathBuf, String> {
+    let stem = video_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .ok_or("The project video filename is invalid.")?;
+    Ok(video_path.with_file_name(format!("{stem}.dialogue-preview.mp4")))
+}
+
 fn output_template_for_grab(output_dir: &Path) -> PathBuf {
     output_dir.join("%(title).200B [%(id)s].%(ext)s")
 }
@@ -344,6 +360,16 @@ fn modified_seconds(path: &Path) -> Option<u64> {
         .and_then(|metadata| metadata.modified().ok())
         .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
         .map(|duration| duration.as_secs())
+}
+
+fn output_is_current(output_path: &Path, input_path: &Path) -> bool {
+    let Some(output_modified) = modified_seconds(output_path) else {
+        return false;
+    };
+    let Some(input_modified) = modified_seconds(input_path) else {
+        return output_path.is_file();
+    };
+    output_modified >= input_modified
 }
 
 fn base64_encode(bytes: &[u8]) -> String {
@@ -1306,10 +1332,13 @@ fn load_review_project_inner(project_path: &Path) -> Result<ReviewProjectData, S
     }
     let project = read_project_value(project_path)?;
     let video_path = project_video_path(project_path, &project)?;
+    let preview_path = preview_proxy_path_for(&video_path)?;
     let output_path = reviewed_output_path_for(&video_path)?;
     Ok(ReviewProjectData {
         project_path: project_path.display().to_string(),
         video_path: video_path.display().to_string(),
+        preview_ready: output_is_current(&preview_path, &video_path),
+        preview_path: preview_path.display().to_string(),
         output_path: output_path.display().to_string(),
         project,
     })
@@ -1487,6 +1516,58 @@ fn run_review_render(
     run_logged_command(app, state, &mut command)
 }
 
+fn run_review_proxy(
+    app: &AppHandle,
+    state: &ConversionState,
+    video_path: &Path,
+    proxy_path: &Path,
+) -> Result<(), String> {
+    if output_is_current(proxy_path, video_path) {
+        return Ok(());
+    }
+
+    let paths = media_paths(app, state)?;
+    let ffmpeg = paths.tools_dir.join("ffmpeg");
+    if !ffmpeg.is_file() {
+        return Err(format!("ffmpeg not found at {}.", ffmpeg.display()));
+    }
+    if let Some(parent) = proxy_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
+    }
+
+    let temporary = proxy_path.with_extension("preview-tmp.mp4");
+    let _ = fs::remove_file(&temporary);
+    emit_status(
+        app,
+        "running",
+        "preview",
+        "Preparing browser-safe preview",
+        Some(proxy_path),
+    );
+    let mut command = Command::new(ffmpeg);
+    command
+        .arg("-hide_banner")
+        .arg("-y")
+        .arg("-i")
+        .arg(video_path)
+        .args(["-map", "0:v:0"])
+        .args(["-map", "0:a:0?"])
+        .arg("-sn")
+        .args(["-vf", "scale=-2:540,format=yuv420p"])
+        .args(["-c:v", "libx264"])
+        .args(["-preset", "veryfast"])
+        .args(["-crf", "28"])
+        .args(["-c:a", "aac"])
+        .args(["-b:a", "128k"])
+        .args(["-movflags", "+faststart"])
+        .arg(&temporary);
+    prepend_media_path(&mut command, &paths);
+    run_logged_command(app, state, &mut command)?;
+    fs::rename(&temporary, proxy_path)
+        .map_err(|error| format!("Could not save {}: {error}", proxy_path.display()))
+}
+
 #[tauri::command]
 fn get_runtime_status(app: AppHandle) -> RuntimeStatus {
     runtime_status_inner(&app)
@@ -1651,6 +1732,71 @@ fn save_review_project(options: SaveReviewProjectOptions) -> Result<(), String> 
         .map_err(|error| format!("Could not serialize project: {error}"))?;
     fs::write(&project_path, format!("{serialized}\n"))
         .map_err(|error| format!("Could not save {}: {error}", project_path.display()))
+}
+
+#[tauri::command]
+fn start_review_proxy(
+    app: AppHandle,
+    state: State<'_, ConversionState>,
+    options: ReviewProxyOptions,
+) -> Result<String, String> {
+    let project_path = PathBuf::from(options.project_path.trim());
+    if !project_path.is_file() {
+        return Err("Choose an existing dialogue project JSON first.".into());
+    }
+    let project = read_project_value(&project_path)?;
+    let video_path = project_video_path(&project_path, &project)?;
+    if !video_path.is_file() {
+        return Err(format!("Project video not found: {}.", video_path.display()));
+    }
+    let proxy_path = preview_proxy_path_for(&video_path)?;
+    if output_is_current(&proxy_path, &video_path) {
+        emit_status(&app, "complete", "preview", "Preview is ready", Some(&proxy_path));
+        return Ok(proxy_path.display().to_string());
+    }
+
+    if state.running.swap(true, Ordering::SeqCst) {
+        return Err("A process is already running.".into());
+    }
+    state.cancel_requested.store(false, Ordering::SeqCst);
+
+    emit_status(
+        &app,
+        "running",
+        "setup",
+        "Checking preview tools",
+        Some(&proxy_path),
+    );
+    let app_for_run = app.clone();
+    let proxy_for_run = proxy_path.clone();
+    thread::spawn(move || {
+        let state = app_for_run.state::<ConversionState>();
+        let result = run_review_proxy(&app_for_run, &state, &video_path, &proxy_for_run);
+        state.running.store(false, Ordering::SeqCst);
+        let _ = set_child_pid(&state, None);
+
+        match result {
+            Ok(()) => emit_status(
+                &app_for_run,
+                "complete",
+                "preview",
+                "Preview is ready",
+                Some(&proxy_for_run),
+            ),
+            Err(error) => {
+                emit_log(&app_for_run, "stderr", &error);
+                emit_status(
+                    &app_for_run,
+                    "error",
+                    "error",
+                    &error,
+                    Some(&proxy_for_run),
+                );
+            }
+        }
+    });
+
+    Ok(proxy_path.display().to_string())
 }
 
 #[tauri::command]
@@ -1855,6 +2001,7 @@ pub fn run() {
             load_review_project,
             save_review_project,
             start_conversion,
+            start_review_proxy,
             start_review_render,
             start_slowdown,
             probe_grab,
