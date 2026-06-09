@@ -595,12 +595,7 @@ input:focus {
 
 .action-row {
   display: flex;
-  flex-wrap: wrap;
   gap: 8px;
-}
-
-.source-action-row {
-  margin-top: 12px;
 }
 
 .primary-button,
@@ -640,219 +635,6 @@ input:focus {
   color: #65736e;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 11px;
-}
-
-.review-grid {
-  display: grid;
-  grid-template-columns: minmax(320px, 1.2fr) minmax(280px, 0.8fr);
-  gap: 18px;
-}
-
-.review-video-shell {
-  position: relative;
-  overflow: hidden;
-  border: 1px solid #c8d2cd;
-  border-radius: 6px;
-  background: #111816;
-}
-
-.review-video {
-  width: 100%;
-  aspect-ratio: 16 / 9;
-  display: block;
-  background: #111816;
-}
-
-.review-preview-overlay {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  padding: 18px;
-  color: #dfe9e5;
-  background: rgba(17, 24, 22, 0.86);
-  font-size: 13px;
-  font-weight: 800;
-  text-align: center;
-}
-
-.review-player-actions {
-  margin-top: 10px;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.review-stats {
-  margin-top: 12px;
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.review-stats span {
-  min-height: 52px;
-  padding: 9px;
-  border: 1px solid #d0d9d4;
-  border-radius: 6px;
-  background: #ffffff;
-}
-
-.review-stats strong,
-.review-stats small {
-  display: block;
-}
-
-.review-stats strong {
-  font-size: 16px;
-  line-height: 1.2;
-}
-
-.segment-edit-pane {
-  min-width: 0;
-  display: grid;
-  align-content: start;
-  gap: 14px;
-}
-
-.segment-text {
-  min-height: 86px;
-  max-height: 150px;
-  padding: 12px;
-  overflow: auto;
-  border: 1px solid #cbd4d0;
-  border-radius: 6px;
-  color: #24312d;
-  background: #ffffff;
-  font-size: 13px;
-  line-height: 1.45;
-}
-
-.segment-time-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-}
-
-.segment-time-grid label > span {
-  display: block;
-  margin-bottom: 6px;
-  color: #53635d;
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.segment-button-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.segment-button-grid .secondary-button {
-  justify-content: center;
-  padding: 0 10px;
-}
-
-.review-timeline {
-  height: 34px;
-  margin-top: 18px;
-  display: flex;
-  gap: 2px;
-}
-
-.timeline-segment {
-  min-width: 4px;
-  height: 34px;
-  padding: 0;
-  border: 1px solid #aebeb8;
-  border-radius: 2px;
-  background: #85b3a6;
-}
-
-.timeline-segment.marked {
-  background: #d6b15d;
-}
-
-.timeline-segment.dropped {
-  background: #d8ddda;
-}
-
-.timeline-segment.active {
-  border-color: #1c4f43;
-  box-shadow: 0 0 0 2px rgba(28, 79, 67, 0.24);
-}
-
-.review-segment-list {
-  max-height: 420px;
-  overflow: auto;
-  display: grid;
-  gap: 7px;
-}
-
-.review-segment-row {
-  width: 100%;
-  min-height: 58px;
-  display: grid;
-  grid-template-columns: 148px minmax(0, 1fr) 76px;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 10px;
-  border: 1px solid #cbd4d0;
-  border-radius: 6px;
-  color: #1f2d29;
-  background: #ffffff;
-  text-align: left;
-}
-
-.review-segment-row.active {
-  border-color: #2f7464;
-  box-shadow: 0 0 0 2px rgba(47, 116, 100, 0.18);
-}
-
-.review-segment-row.dropped {
-  color: #75827d;
-  background: #f0f3f1;
-}
-
-.review-segment-row.marked .segment-row-badge {
-  border-color: #d6b15d;
-  color: #6f4d12;
-  background: #fff7df;
-}
-
-.segment-row-meta,
-.segment-row-text,
-.segment-row-badge {
-  min-width: 0;
-}
-
-.segment-row-meta strong,
-.segment-row-meta small {
-  display: block;
-}
-
-.segment-row-meta strong {
-  font-size: 12px;
-}
-
-.segment-row-text {
-  overflow: hidden;
-  display: -webkit-box;
-  font-size: 12px;
-  line-height: 1.35;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-}
-
-.segment-row-badge {
-  padding: 4px 6px;
-  border: 1px solid #b9c8c2;
-  border-radius: 999px;
-  color: #315d52;
-  background: #edf5f1;
-  font-size: 10px;
-  font-weight: 800;
-  text-align: center;
 }
 
 .side-panel {
@@ -934,10 +716,6 @@ input:focus {
     grid-template-columns: 1fr;
   }
 
-  .review-grid {
-    grid-template-columns: 1fr;
-  }
-
   .side-panel {
     border-top: 1px solid #ced7d1;
     border-left: 0;
@@ -961,10 +739,6 @@ input:focus {
   .settings-grid,
   .speed-grid,
   .metadata-grid,
-  .review-stats,
-  .segment-time-grid,
-  .segment-button-grid,
-  .review-segment-row,
   .input-action-row {
     grid-template-columns: 1fr;
   }

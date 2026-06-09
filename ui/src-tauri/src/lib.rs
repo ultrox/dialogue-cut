@@ -114,43 +114,6 @@ struct MaterialVideo {
     thumbnail_data_url: Option<String>,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ReviewProjectOptions {
-    project_path: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ReviewProxyOptions {
-    project_path: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SaveReviewProjectOptions {
-    project_path: String,
-    project: serde_json::Value,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RenderReviewProjectOptions {
-    project_path: String,
-    output_path: String,
-}
-
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ReviewProjectData {
-    project_path: String,
-    video_path: String,
-    preview_path: String,
-    preview_ready: bool,
-    output_path: String,
-    project: serde_json::Value,
-}
-
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ConversionStatus {
@@ -318,59 +281,6 @@ fn output_path_for_slowdown(video_path: &Path, speed: f64) -> Result<PathBuf, St
     Ok(video_path.with_file_name(format!("{stem}.slow-{speed:.2}x.mp4")))
 }
 
-fn browser_source_path_for(video_path: &Path) -> Result<PathBuf, String> {
-    let stem = video_path
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .ok_or("The selected video filename is invalid.")?;
-    Ok(video_path.with_file_name(format!("{stem}.dialogue-source.mp4")))
-}
-
-fn dialogue_project_path_for(output_path: &Path) -> Result<PathBuf, String> {
-    let stem = output_path
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .ok_or("The output filename is invalid.")?;
-    let source_stem = stem.strip_suffix(".dialogue-only").unwrap_or(stem);
-    Ok(output_path.with_file_name(format!("{source_stem}.dialogue-project.json")))
-}
-
-fn dialogue_review_report_path_for(output_path: &Path) -> Result<PathBuf, String> {
-    let stem = output_path
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .ok_or("The output filename is invalid.")?;
-    let source_stem = stem.strip_suffix(".dialogue-only").unwrap_or(stem);
-    Ok(output_path.with_file_name(format!("{source_stem}.dialogue-review.txt")))
-}
-
-fn reviewed_output_path_for(video_path: &Path) -> Result<PathBuf, String> {
-    let stem = video_path
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .ok_or("The project video filename is invalid.")?;
-    Ok(video_path.with_file_name(format!("{stem}.dialogue-only.reviewed.mp4")))
-}
-
-fn reviewed_output_path_for_project(project_path: &Path) -> Result<PathBuf, String> {
-    let stem = project_path
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .ok_or("The project filename is invalid.")?;
-    let source_stem = stem.strip_suffix(".dialogue-project").unwrap_or(stem);
-    Ok(project_path.with_file_name(format!(
-        "{source_stem}.dialogue-only.reviewed.mp4"
-    )))
-}
-
-fn preview_proxy_path_for(video_path: &Path) -> Result<PathBuf, String> {
-    let stem = video_path
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .ok_or("The project video filename is invalid.")?;
-    Ok(video_path.with_file_name(format!("{stem}.dialogue-preview.mp4")))
-}
-
 fn output_template_for_grab(output_dir: &Path) -> PathBuf {
     output_dir.join("%(title).200B [%(id)s].%(ext)s")
 }
@@ -397,16 +307,6 @@ fn modified_seconds(path: &Path) -> Option<u64> {
         .and_then(|metadata| metadata.modified().ok())
         .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
         .map(|duration| duration.as_secs())
-}
-
-fn output_is_current(output_path: &Path, input_path: &Path) -> bool {
-    let Some(output_modified) = modified_seconds(output_path) else {
-        return false;
-    };
-    let Some(input_modified) = modified_seconds(input_path) else {
-        return output_path.is_file();
-    };
-    output_modified >= input_modified
 }
 
 fn base64_encode(bytes: &[u8]) -> String {
@@ -1237,59 +1137,6 @@ fn video_duration(ffprobe: &Path, video_path: &Path) -> Option<f64> {
         .ok()
 }
 
-fn source_is_browser_playable(ffprobe: &Path, video_path: &Path) -> bool {
-    let extension_ok = video_path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(|extension| matches!(extension.to_ascii_lowercase().as_str(), "mp4" | "m4v" | "mov"))
-        .unwrap_or(false);
-    if !extension_ok {
-        return false;
-    }
-
-    let output = Command::new(ffprobe)
-        .args([
-            "-v",
-            "error",
-            "-show_entries",
-            "stream=codec_type,codec_name",
-            "-of",
-            "json",
-        ])
-        .arg(video_path)
-        .output();
-    let Ok(output) = output else {
-        return false;
-    };
-    if !output.status.success() {
-        return false;
-    }
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
-        return false;
-    };
-    let Some(streams) = value.get("streams").and_then(serde_json::Value::as_array) else {
-        return false;
-    };
-
-    let mut has_h264_video = false;
-    for stream in streams {
-        let codec_type = stream
-            .get("codec_type")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("");
-        let codec_name = stream
-            .get("codec_name")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("");
-        if codec_type == "video" {
-            has_h264_video = codec_name == "h264";
-        } else if codec_type == "audio" && !matches!(codec_name, "aac" | "mp3") {
-            return false;
-        }
-    }
-    has_h264_video
-}
-
 fn thumbnail_data_url(ffmpeg: &Path, video_path: &Path, duration: Option<f64>) -> Option<String> {
     let seek = duration
         .filter(|duration| *duration > 8.0)
@@ -1378,136 +1225,10 @@ fn list_material_videos_inner(
         .collect())
 }
 
-fn dialogue_project_script(app: &AppHandle) -> Result<PathBuf, String> {
-    let local = local_tool_dir().join("dialogue_project.py");
-    if cfg!(debug_assertions) && local.is_file() {
-        return Ok(local);
-    }
-    let resource_dir = app
-        .path()
-        .resource_dir()
-        .map_err(|error| format!("Could not locate bundled processor files: {error}"))?;
-    Ok(resource_dir.join("processor/dialogue_project.py"))
-}
-
-fn read_project_value(project_path: &Path) -> Result<serde_json::Value, String> {
-    let raw = fs::read_to_string(project_path)
-        .map_err(|error| format!("Could not read {}: {error}", project_path.display()))?;
-    serde_json::from_str(&raw)
-        .map_err(|error| format!("Could not parse {}: {error}", project_path.display()))
-}
-
-fn project_video_path(
-    project_path: &Path,
-    project: &serde_json::Value,
-) -> Result<PathBuf, String> {
-    let raw = project
-        .get("video")
-        .and_then(serde_json::Value::as_str)
-        .ok_or("The project does not contain a video path.")?;
-    let path = PathBuf::from(raw);
-    if path.is_absolute() {
-        Ok(path)
-    } else {
-        Ok(project_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join(path))
-    }
-}
-
-fn load_review_project_inner(project_path: &Path) -> Result<ReviewProjectData, String> {
-    if !project_path.is_file() {
-        return Err("Choose an existing dialogue project JSON first.".into());
-    }
-    let project = read_project_value(project_path)?;
-    let video_path = project_video_path(project_path, &project)?;
-    let video_path_is_mp4 = video_path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(|extension| matches!(extension.to_ascii_lowercase().as_str(), "mp4" | "m4v" | "mov"))
-        .unwrap_or(false);
-    let fallback_preview_path = preview_proxy_path_for(&video_path)?;
-    let preview_path = if video_path_is_mp4 {
-        video_path.clone()
-    } else {
-        fallback_preview_path.clone()
-    };
-    let output_path = reviewed_output_path_for_project(project_path)?;
-    Ok(ReviewProjectData {
-        project_path: project_path.display().to_string(),
-        video_path: video_path.display().to_string(),
-        preview_ready: video_path_is_mp4 || output_is_current(&fallback_preview_path, &video_path),
-        preview_path: preview_path.display().to_string(),
-        output_path: output_path.display().to_string(),
-        project,
-    })
-}
-
-fn prepare_browser_source(
-    app: &AppHandle,
-    state: &ConversionState,
-    paths: &ProcessorPaths,
-    video_path: &Path,
-) -> Result<PathBuf, String> {
-    let ffmpeg = paths.tools_dir.join("ffmpeg");
-    let ffprobe = paths.tools_dir.join("ffprobe");
-    if !ffmpeg.is_file() {
-        return Err(format!("ffmpeg not found at {}.", ffmpeg.display()));
-    }
-    if source_is_browser_playable(&ffprobe, video_path) {
-        emit_log(app, "stdout", "Source is already browser-playable.");
-        return Ok(video_path.to_path_buf());
-    }
-
-    let output_path = browser_source_path_for(video_path)?;
-    if output_is_current(&output_path, video_path) {
-        emit_log(
-            app,
-            "stdout",
-            format!("Using cached browser source: {}", output_path.display()),
-        );
-        return Ok(output_path);
-    }
-
-    emit_status(
-        app,
-        "running",
-        "prepare",
-        "Creating browser-playable source",
-        Some(&output_path),
-    );
-    let temporary = output_path.with_extension("source-tmp.mp4");
-    let _ = fs::remove_file(&temporary);
-    let mut command = Command::new(ffmpeg);
-    command
-        .arg("-hide_banner")
-        .arg("-y")
-        .arg("-i")
-        .arg(video_path)
-        .args(["-map", "0:v:0"])
-        .args(["-map", "0:a:0?"])
-        .arg("-sn")
-        .args(["-vf", "format=yuv420p"])
-        .args(["-c:v", "libx264"])
-        .args(["-preset", "veryfast"])
-        .args(["-crf", "22"])
-        .args(["-c:a", "aac"])
-        .args(["-b:a", "192k"])
-        .args(["-movflags", "+faststart"])
-        .arg(&temporary);
-    prepend_media_path(&mut command, paths);
-    run_logged_command(app, state, &mut command)?;
-    fs::rename(&temporary, &output_path)
-        .map_err(|error| format!("Could not save {}: {error}", output_path.display()))?;
-    Ok(output_path)
-}
-
 fn run_conversion(
     app: &AppHandle,
     state: &ConversionState,
     options: &ConversionOptions,
-    output_path: &Path,
 ) -> Result<(), String> {
     let video_path = PathBuf::from(&options.video_path);
     let paths = processor_paths(app, state)?;
@@ -1517,27 +1238,18 @@ fn run_conversion(
             paths.script.display()
         ));
     }
-    let browser_source_path = prepare_browser_source(app, state, &paths, &video_path)?;
-    let project_path = dialogue_project_path_for(output_path)?;
-    let review_report_path = dialogue_review_report_path_for(output_path)?;
 
     emit_status(
         app,
         "running",
         "inspect",
-        "Inspecting browser-playable source",
+        "Inspecting the selected video",
         None,
     );
     let mut command = Command::new(&paths.python);
     command
         .arg(&paths.script)
-        .arg(&browser_source_path)
-        .arg("--output")
-        .arg(output_path)
-        .arg("--project")
-        .arg(project_path)
-        .arg("--review-report")
-        .arg(review_report_path)
+        .arg(&video_path)
         .args(["--venv-dir", &paths.venv_dir.display().to_string()])
         .args(["--pre-pad", &options.pre_pad.to_string()])
         .args(["--post-pad", &options.post_pad.to_string()])
@@ -1649,95 +1361,6 @@ fn run_grab(
     }
 }
 
-fn run_review_render(
-    app: &AppHandle,
-    state: &ConversionState,
-    options: &RenderReviewProjectOptions,
-    output_path: &Path,
-) -> Result<(), String> {
-    let project_path = PathBuf::from(options.project_path.trim());
-    if !project_path.is_file() {
-        return Err("Choose an existing dialogue project JSON first.".into());
-    }
-    let paths = processor_paths(app, state)?;
-    let script = dialogue_project_script(app)?;
-    if !script.is_file() {
-        return Err(format!(
-            "Dialogue project renderer not found at {}.",
-            script.display()
-        ));
-    }
-
-    emit_status(
-        app,
-        "running",
-        "render",
-        "Rendering edited segments",
-        Some(output_path),
-    );
-    let mut command = Command::new(&paths.python);
-    command
-        .arg(script)
-        .arg("render")
-        .arg(project_path)
-        .arg(output_path);
-    prepend_runtime_path(&mut command, &paths);
-    run_logged_command(app, state, &mut command)
-}
-
-fn run_review_proxy(
-    app: &AppHandle,
-    state: &ConversionState,
-    video_path: &Path,
-    proxy_path: &Path,
-) -> Result<(), String> {
-    if output_is_current(proxy_path, video_path) {
-        return Ok(());
-    }
-
-    let paths = media_paths(app, state)?;
-    let ffmpeg = paths.tools_dir.join("ffmpeg");
-    if !ffmpeg.is_file() {
-        return Err(format!("ffmpeg not found at {}.", ffmpeg.display()));
-    }
-    if let Some(parent) = proxy_path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
-    }
-
-    let temporary = proxy_path.with_extension("preview-tmp.mp4");
-    let _ = fs::remove_file(&temporary);
-    emit_status(
-        app,
-        "running",
-        "preview",
-        "Preparing browser-safe preview",
-        Some(proxy_path),
-    );
-    emit_log(app, "stdout", "Using software H.264 preview encoder.");
-    let mut command = Command::new(ffmpeg);
-    command
-        .arg("-hide_banner")
-        .arg("-y")
-        .arg("-i")
-        .arg(video_path)
-        .args(["-map", "0:v:0"])
-        .args(["-map", "0:a:0?"])
-        .arg("-sn")
-        .args(["-vf", "scale=-2:360,format=yuv420p"])
-        .args(["-c:v", "libx264"])
-        .args(["-preset", "ultrafast"])
-        .args(["-crf", "30"])
-        .args(["-c:a", "aac"])
-        .args(["-b:a", "128k"])
-        .args(["-movflags", "+faststart"])
-        .arg(&temporary);
-    prepend_media_path(&mut command, &paths);
-    run_logged_command(app, state, &mut command)?;
-    fs::rename(&temporary, proxy_path)
-        .map_err(|error| format!("Could not save {}: {error}", proxy_path.display()))
-}
-
 #[tauri::command]
 fn get_runtime_status(app: AppHandle) -> RuntimeStatus {
     runtime_status_inner(&app)
@@ -1775,7 +1398,7 @@ fn start_conversion(
     let output_for_run = output_path.clone();
     thread::spawn(move || {
         let state = app_for_run.state::<ConversionState>();
-        let result = run_conversion(&app_for_run, &state, &options, &output_for_run);
+        let result = run_conversion(&app_for_run, &state, &options);
         state.running.store(false, Ordering::SeqCst);
         let _ = set_child_pid(&state, None);
 
@@ -1883,162 +1506,6 @@ fn list_material_videos(
         PathBuf::from(options.directory.trim())
     };
     list_material_videos_inner(&app, &state, &directory)
-}
-
-#[tauri::command]
-fn load_review_project(options: ReviewProjectOptions) -> Result<ReviewProjectData, String> {
-    let project_path = PathBuf::from(options.project_path.trim());
-    load_review_project_inner(&project_path)
-}
-
-#[tauri::command]
-fn save_review_project(options: SaveReviewProjectOptions) -> Result<(), String> {
-    let project_path = PathBuf::from(options.project_path.trim());
-    if project_path.as_os_str().is_empty() {
-        return Err("Choose a project path first.".into());
-    }
-    project_video_path(&project_path, &options.project)?;
-    let serialized = serde_json::to_string_pretty(&options.project)
-        .map_err(|error| format!("Could not serialize project: {error}"))?;
-    fs::write(&project_path, format!("{serialized}\n"))
-        .map_err(|error| format!("Could not save {}: {error}", project_path.display()))
-}
-
-#[tauri::command]
-fn start_review_proxy(
-    app: AppHandle,
-    state: State<'_, ConversionState>,
-    options: ReviewProxyOptions,
-) -> Result<String, String> {
-    let project_path = PathBuf::from(options.project_path.trim());
-    if !project_path.is_file() {
-        return Err("Choose an existing dialogue project JSON first.".into());
-    }
-    let project = read_project_value(&project_path)?;
-    let video_path = project_video_path(&project_path, &project)?;
-    if !video_path.is_file() {
-        return Err(format!("Project video not found: {}.", video_path.display()));
-    }
-    let proxy_path = preview_proxy_path_for(&video_path)?;
-    if output_is_current(&proxy_path, &video_path) {
-        emit_status(&app, "complete", "preview", "Preview is ready", Some(&proxy_path));
-        return Ok(proxy_path.display().to_string());
-    }
-
-    if state.running.swap(true, Ordering::SeqCst) {
-        return Err("A process is already running.".into());
-    }
-    state.cancel_requested.store(false, Ordering::SeqCst);
-
-    emit_status(
-        &app,
-        "running",
-        "setup",
-        "Checking preview tools",
-        Some(&proxy_path),
-    );
-    let app_for_run = app.clone();
-    let proxy_for_run = proxy_path.clone();
-    thread::spawn(move || {
-        let state = app_for_run.state::<ConversionState>();
-        let result = run_review_proxy(&app_for_run, &state, &video_path, &proxy_for_run);
-        state.running.store(false, Ordering::SeqCst);
-        let _ = set_child_pid(&state, None);
-
-        match result {
-            Ok(()) => emit_status(
-                &app_for_run,
-                "complete",
-                "preview",
-                "Preview is ready",
-                Some(&proxy_for_run),
-            ),
-            Err(error) => {
-                emit_log(&app_for_run, "stderr", &error);
-                emit_status(
-                    &app_for_run,
-                    "error",
-                    "error",
-                    &error,
-                    Some(&proxy_for_run),
-                );
-            }
-        }
-    });
-
-    Ok(proxy_path.display().to_string())
-}
-
-#[tauri::command]
-fn start_review_render(
-    app: AppHandle,
-    state: State<'_, ConversionState>,
-    options: RenderReviewProjectOptions,
-) -> Result<String, String> {
-    if state.running.swap(true, Ordering::SeqCst) {
-        return Err("A process is already running.".into());
-    }
-    state.cancel_requested.store(false, Ordering::SeqCst);
-
-    let project_path = PathBuf::from(options.project_path.trim());
-    if !project_path.is_file() {
-        state.running.store(false, Ordering::SeqCst);
-        return Err("Choose an existing dialogue project JSON first.".into());
-    }
-    let output_path = if options.output_path.trim().is_empty() {
-        let project = read_project_value(&project_path).map_err(|error| {
-            state.running.store(false, Ordering::SeqCst);
-            error
-        })?;
-        let video_path = project_video_path(&project_path, &project).map_err(|error| {
-            state.running.store(false, Ordering::SeqCst);
-            error
-        })?;
-        reviewed_output_path_for(&video_path).map_err(|error| {
-            state.running.store(false, Ordering::SeqCst);
-            error
-        })?
-    } else {
-        PathBuf::from(options.output_path.trim())
-    };
-
-    emit_status(
-        &app,
-        "running",
-        "setup",
-        "Checking render tools",
-        Some(&output_path),
-    );
-    let app_for_run = app.clone();
-    let output_for_run = output_path.clone();
-    thread::spawn(move || {
-        let state = app_for_run.state::<ConversionState>();
-        let result = run_review_render(&app_for_run, &state, &options, &output_for_run);
-        state.running.store(false, Ordering::SeqCst);
-        let _ = set_child_pid(&state, None);
-
-        match result {
-            Ok(()) => emit_status(
-                &app_for_run,
-                "complete",
-                "complete",
-                "Reviewed dialogue cut is ready",
-                Some(&output_for_run),
-            ),
-            Err(error) => {
-                emit_log(&app_for_run, "stderr", &error);
-                emit_status(
-                    &app_for_run,
-                    "error",
-                    "error",
-                    &error,
-                    Some(&output_for_run),
-                );
-            }
-        }
-    });
-
-    Ok(output_path.display().to_string())
 }
 
 #[tauri::command]
@@ -2168,11 +1635,7 @@ pub fn run() {
             get_runtime_status,
             get_default_grab_output_dir,
             list_material_videos,
-            load_review_project,
-            save_review_project,
             start_conversion,
-            start_review_proxy,
-            start_review_render,
             start_slowdown,
             probe_grab,
             start_grab,
