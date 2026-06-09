@@ -114,6 +114,35 @@ struct MaterialVideo {
     thumbnail_data_url: Option<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewProjectOptions {
+    project_path: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveReviewProjectOptions {
+    project_path: String,
+    project: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RenderReviewProjectOptions {
+    project_path: String,
+    output_path: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewProjectData {
+    project_path: String,
+    video_path: String,
+    output_path: String,
+    project: serde_json::Value,
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ConversionStatus {
@@ -279,6 +308,14 @@ fn output_path_for_slowdown(video_path: &Path, speed: f64) -> Result<PathBuf, St
         .and_then(|value| value.to_str())
         .ok_or("The selected video filename is invalid.")?;
     Ok(video_path.with_file_name(format!("{stem}.slow-{speed:.2}x.mp4")))
+}
+
+fn reviewed_output_path_for(video_path: &Path) -> Result<PathBuf, String> {
+    let stem = video_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .ok_or("The project video filename is invalid.")?;
+    Ok(video_path.with_file_name(format!("{stem}.dialogue-only.reviewed.mp4")))
 }
 
 fn output_template_for_grab(output_dir: &Path) -> PathBuf {
@@ -1225,6 +1262,59 @@ fn list_material_videos_inner(
         .collect())
 }
 
+fn dialogue_project_script(app: &AppHandle) -> Result<PathBuf, String> {
+    let local = local_tool_dir().join("dialogue_project.py");
+    if cfg!(debug_assertions) && local.is_file() {
+        return Ok(local);
+    }
+    let resource_dir = app
+        .path()
+        .resource_dir()
+        .map_err(|error| format!("Could not locate bundled processor files: {error}"))?;
+    Ok(resource_dir.join("processor/dialogue_project.py"))
+}
+
+fn read_project_value(project_path: &Path) -> Result<serde_json::Value, String> {
+    let raw = fs::read_to_string(project_path)
+        .map_err(|error| format!("Could not read {}: {error}", project_path.display()))?;
+    serde_json::from_str(&raw)
+        .map_err(|error| format!("Could not parse {}: {error}", project_path.display()))
+}
+
+fn project_video_path(
+    project_path: &Path,
+    project: &serde_json::Value,
+) -> Result<PathBuf, String> {
+    let raw = project
+        .get("video")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("The project does not contain a video path.")?;
+    let path = PathBuf::from(raw);
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Ok(project_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(path))
+    }
+}
+
+fn load_review_project_inner(project_path: &Path) -> Result<ReviewProjectData, String> {
+    if !project_path.is_file() {
+        return Err("Choose an existing dialogue project JSON first.".into());
+    }
+    let project = read_project_value(project_path)?;
+    let video_path = project_video_path(project_path, &project)?;
+    let output_path = reviewed_output_path_for(&video_path)?;
+    Ok(ReviewProjectData {
+        project_path: project_path.display().to_string(),
+        video_path: video_path.display().to_string(),
+        output_path: output_path.display().to_string(),
+        project,
+    })
+}
+
 fn run_conversion(
     app: &AppHandle,
     state: &ConversionState,
@@ -1359,6 +1449,42 @@ fn run_grab(
             run_logged_command(app, state, &mut command)
         }
     }
+}
+
+fn run_review_render(
+    app: &AppHandle,
+    state: &ConversionState,
+    options: &RenderReviewProjectOptions,
+    output_path: &Path,
+) -> Result<(), String> {
+    let project_path = PathBuf::from(options.project_path.trim());
+    if !project_path.is_file() {
+        return Err("Choose an existing dialogue project JSON first.".into());
+    }
+    let paths = processor_paths(app, state)?;
+    let script = dialogue_project_script(app)?;
+    if !script.is_file() {
+        return Err(format!(
+            "Dialogue project renderer not found at {}.",
+            script.display()
+        ));
+    }
+
+    emit_status(
+        app,
+        "running",
+        "render",
+        "Rendering edited segments",
+        Some(output_path),
+    );
+    let mut command = Command::new(&paths.python);
+    command
+        .arg(script)
+        .arg("render")
+        .arg(project_path)
+        .arg(output_path);
+    prepend_runtime_path(&mut command, &paths);
+    run_logged_command(app, state, &mut command)
 }
 
 #[tauri::command]
@@ -1509,6 +1635,97 @@ fn list_material_videos(
 }
 
 #[tauri::command]
+fn load_review_project(options: ReviewProjectOptions) -> Result<ReviewProjectData, String> {
+    let project_path = PathBuf::from(options.project_path.trim());
+    load_review_project_inner(&project_path)
+}
+
+#[tauri::command]
+fn save_review_project(options: SaveReviewProjectOptions) -> Result<(), String> {
+    let project_path = PathBuf::from(options.project_path.trim());
+    if project_path.as_os_str().is_empty() {
+        return Err("Choose a project path first.".into());
+    }
+    project_video_path(&project_path, &options.project)?;
+    let serialized = serde_json::to_string_pretty(&options.project)
+        .map_err(|error| format!("Could not serialize project: {error}"))?;
+    fs::write(&project_path, format!("{serialized}\n"))
+        .map_err(|error| format!("Could not save {}: {error}", project_path.display()))
+}
+
+#[tauri::command]
+fn start_review_render(
+    app: AppHandle,
+    state: State<'_, ConversionState>,
+    options: RenderReviewProjectOptions,
+) -> Result<String, String> {
+    if state.running.swap(true, Ordering::SeqCst) {
+        return Err("A process is already running.".into());
+    }
+    state.cancel_requested.store(false, Ordering::SeqCst);
+
+    let project_path = PathBuf::from(options.project_path.trim());
+    if !project_path.is_file() {
+        state.running.store(false, Ordering::SeqCst);
+        return Err("Choose an existing dialogue project JSON first.".into());
+    }
+    let output_path = if options.output_path.trim().is_empty() {
+        let project = read_project_value(&project_path).map_err(|error| {
+            state.running.store(false, Ordering::SeqCst);
+            error
+        })?;
+        let video_path = project_video_path(&project_path, &project).map_err(|error| {
+            state.running.store(false, Ordering::SeqCst);
+            error
+        })?;
+        reviewed_output_path_for(&video_path).map_err(|error| {
+            state.running.store(false, Ordering::SeqCst);
+            error
+        })?
+    } else {
+        PathBuf::from(options.output_path.trim())
+    };
+
+    emit_status(
+        &app,
+        "running",
+        "setup",
+        "Checking render tools",
+        Some(&output_path),
+    );
+    let app_for_run = app.clone();
+    let output_for_run = output_path.clone();
+    thread::spawn(move || {
+        let state = app_for_run.state::<ConversionState>();
+        let result = run_review_render(&app_for_run, &state, &options, &output_for_run);
+        state.running.store(false, Ordering::SeqCst);
+        let _ = set_child_pid(&state, None);
+
+        match result {
+            Ok(()) => emit_status(
+                &app_for_run,
+                "complete",
+                "complete",
+                "Reviewed dialogue cut is ready",
+                Some(&output_for_run),
+            ),
+            Err(error) => {
+                emit_log(&app_for_run, "stderr", &error);
+                emit_status(
+                    &app_for_run,
+                    "error",
+                    "error",
+                    &error,
+                    Some(&output_for_run),
+                );
+            }
+        }
+    });
+
+    Ok(output_path.display().to_string())
+}
+
+#[tauri::command]
 fn probe_grab(
     app: AppHandle,
     state: State<'_, ConversionState>,
@@ -1635,7 +1852,10 @@ pub fn run() {
             get_runtime_status,
             get_default_grab_output_dir,
             list_material_videos,
+            load_review_project,
+            save_review_project,
             start_conversion,
+            start_review_render,
             start_slowdown,
             probe_grab,
             start_grab,
