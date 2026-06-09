@@ -224,21 +224,18 @@ app.innerHTML = `
               <i data-lucide="folder-open"></i>
             </button>
           </div>
-        </section>
-
-        <section class="section-block material-gallery-block">
-          <div class="section-heading">
-            <div>
-              <span class="eyebrow">Material</span>
-              <h2>Output folder videos</h2>
-            </div>
-            <button id="material-refresh-button" class="icon-button" type="button" title="Refresh videos">
-              <i data-lucide="refresh-cw"></i>
+          <p id="processing-run-message" class="inline-status">Choose a video file to begin</p>
+          <div class="action-row source-action-row">
+            <button id="processing-start-button" class="primary-button" type="button">
+              <i data-lucide="play"></i>
+              <span>Start transcode</span>
+            </button>
+            <button id="processing-stop-button" class="secondary-button" type="button" disabled>
+              <i data-lucide="square"></i>
+              <span>Cancel</span>
             </button>
           </div>
-          <div id="material-gallery" class="material-gallery">
-            <p class="empty-note">Loading videos...</p>
-          </div>
+          <p id="processing-output-path" class="output-path"></p>
         </section>
 
         <section class="section-block">
@@ -267,24 +264,19 @@ app.innerHTML = `
           </div>
         </section>
 
-        <section class="section-block run-block">
-          <div class="section-heading compact">
+        <section class="section-block material-gallery-block">
+          <div class="section-heading">
             <div>
-              <span class="eyebrow">Run</span>
-              <h2 id="processing-run-message">Choose a video file to begin</h2>
+              <span class="eyebrow">Material</span>
+              <h2>Output folder videos</h2>
             </div>
-          </div>
-          <div class="action-row">
-            <button id="processing-start-button" class="primary-button" type="button">
-              <i data-lucide="play"></i>
-              <span>Start transcode</span>
-            </button>
-            <button id="processing-stop-button" class="secondary-button" type="button" disabled>
-              <i data-lucide="square"></i>
-              <span>Cancel</span>
+            <button id="material-refresh-button" class="icon-button" type="button" title="Refresh videos">
+              <i data-lucide="refresh-cw"></i>
             </button>
           </div>
-          <p id="processing-output-path" class="output-path"></p>
+          <div id="material-gallery" class="material-gallery">
+            <p class="empty-note">Loading videos...</p>
+          </div>
         </section>
       </div>
 

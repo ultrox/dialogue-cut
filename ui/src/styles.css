@@ -598,6 +598,10 @@ input:focus {
   gap: 8px;
 }
 
+.source-action-row {
+  margin-top: 12px;
+}
+
 .primary-button,
 .secondary-button {
   min-height: 40px;
