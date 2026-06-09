@@ -162,6 +162,62 @@ def classify_cue(cue):
     return cue
 
 
+def short_repetition_candidate(cue):
+    metrics = cue.get("metrics", {})
+    return (
+        cue.get("class") == "dialogue"
+        and metrics.get("duration", 0) <= 4.0
+        and 1 <= metrics.get("wordCount", 0) <= 8
+    )
+
+
+def repetition_fingerprint(cue):
+    return " ".join(WORD_RE.findall(cue.get("text", "").lower()))
+
+
+def mark_repeated_cue_run(cue, reason):
+    cue["class"] = "suspect"
+    cue["review"] = True
+    cue.setdefault("reviewReasons", [])
+    if reason not in cue["reviewReasons"]:
+        cue["reviewReasons"].append(reason)
+
+
+def classify_repeated_cue_runs(cues):
+    index = 0
+    while index < len(cues):
+        if not short_repetition_candidate(cues[index]):
+            index += 1
+            continue
+
+        run_start = index
+        index += 1
+        while index < len(cues):
+            gap = cues[index]["start"] - cues[index - 1]["end"]
+            if gap > 0.4 or not short_repetition_candidate(cues[index]):
+                break
+            index += 1
+        run = cues[run_start:index]
+
+        counts = Counter(
+            fingerprint for cue in run if (fingerprint := repetition_fingerprint(cue))
+        )
+        repeated_fingerprints = {
+            fingerprint for fingerprint, count in counts.items() if count >= 3
+        }
+        repeated_cues = [
+            cue for cue in run if repetition_fingerprint(cue) in repeated_fingerprints
+        ]
+        repeated_duration = sum(cue["end"] - cue["start"] for cue in repeated_cues)
+        if (
+            len(repeated_fingerprints) <= 3
+            and len(repeated_cues) >= 6
+            and repeated_duration >= 10.0
+        ):
+            for cue in repeated_cues:
+                mark_repeated_cue_run(cue, "repeated-cue-run")
+
+
 def classify_cues(cues):
     classified = []
     sorted_cues = sorted(cues, key=lambda item: (item["start"], item["end"]))
@@ -169,6 +225,7 @@ def classify_cues(cues):
         cue = dict(cue)
         cue["id"] = f"cue-{index:04d}"
         classified.append(classify_cue(cue))
+    classify_repeated_cue_runs(classified)
     return classified
 
 
