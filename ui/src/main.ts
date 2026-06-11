@@ -1605,19 +1605,56 @@ function setActivePlayerCue(index: number) {
   }
 }
 
+// Mirrors dialogue-only playback: each cue plays from (start - offset) to its
+// end, and gaps short enough to play through are counted as watched time.
+function dialogueOnlyDuration(): number {
+  let total = 0;
+  let rangeStart = -1;
+  let rangeEnd = -1;
+  for (const cue of playerCues) {
+    const start = Math.max(0, cue.start - playerOffset);
+    if (rangeEnd >= 0 && start <= rangeEnd + 0.35) {
+      rangeEnd = Math.max(rangeEnd, cue.end);
+    } else {
+      if (rangeEnd >= 0) {
+        total += rangeEnd - rangeStart;
+      }
+      rangeStart = start;
+      rangeEnd = cue.end;
+    }
+  }
+  if (rangeEnd >= 0) {
+    total += rangeEnd - rangeStart;
+  }
+  return total;
+}
+
+function updatePlayerSummary() {
+  if (playerCues.length === 0) {
+    playerCueCount.textContent = "No cues loaded";
+    return;
+  }
+  const dialogue = dialogueOnlyDuration();
+  let summary = `${playerCues.length} cues · dialogue only ≈ ${formatCueTime(dialogue)}`;
+  const total = playerVideo.duration;
+  if (Number.isFinite(total) && total > 0) {
+    summary += ` of ${formatCueTime(total)} (${Math.round((dialogue / total) * 100)}%)`;
+  }
+  playerCueCount.textContent = summary;
+}
+
 function renderPlayerCues() {
   playerCueList.replaceChildren();
   playerCueButtons = [];
   playerActiveCue = -1;
+  updatePlayerSummary();
   if (playerCues.length === 0) {
     const empty = document.createElement("p");
     empty.className = "empty-note";
     empty.textContent = "No cues found in the selected subtitles.";
     playerCueList.append(empty);
-    playerCueCount.textContent = "No cues loaded";
     return;
   }
-  playerCueCount.textContent = `${playerCues.length} cues`;
   playerCues.forEach((cue, index) => {
     const button = document.createElement("button");
     button.className = "cue-row";
@@ -1721,6 +1758,7 @@ function updatePlayerOffset(value: string) {
   offsetPresetButtons.forEach((button) => {
     button.classList.toggle("active", Number(button.dataset.offset) === playerOffset);
   });
+  updatePlayerSummary();
 }
 
 function stepPlayerCue(direction: -1 | 1) {
@@ -1813,6 +1851,7 @@ playerVideo.addEventListener("timeupdate", () => {
   setActivePlayerCue(cueIndexAt(time));
   skipGapIfNeeded(time);
 });
+playerVideo.addEventListener("loadedmetadata", updatePlayerSummary);
 
 async function stopCurrentRun() {
   try {
