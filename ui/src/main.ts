@@ -1507,6 +1507,8 @@ let playerCues: SubtitleCue[] = [];
 let playerCueButtons: HTMLButtonElement[] = [];
 let playerActiveCue = -1;
 let playerOffset = 0.5;
+let playerDroppedCues = 0;
+let playerClampedCues = 0;
 
 function parseSubtitleTimestamp(raw: string): number | null {
   const match = raw.trim().match(/^(?:(\d+):)?(\d{1,2}):(\d{2})[.,](\d{1,3})$/);
@@ -1548,6 +1550,37 @@ function parseSubtitles(content: string): SubtitleCue[] {
   }
   cues.sort((a, b) => a.start - b.start);
   return cues;
+}
+
+// Whisper transcripts hallucinate in silence and music: cues with no real
+// text, the same line tiled across back-to-back cues, and short phrases
+// stretched over 30-second decode windows. Clean those up so playback,
+// dialogue-only skipping, and the runtime estimate stay honest.
+const MAX_CUE_SECONDS = 12;
+
+function cleanCues(cues: SubtitleCue[]): SubtitleCue[] {
+  const cleaned: SubtitleCue[] = [];
+  playerDroppedCues = 0;
+  playerClampedCues = 0;
+  for (const cue of cues) {
+    if (!/[\p{L}\p{N}]/u.test(cue.text)) {
+      playerDroppedCues += 1;
+      continue;
+    }
+    const previous = cleaned[cleaned.length - 1];
+    if (previous && previous.text === cue.text && cue.start - previous.end < 1) {
+      // A contiguous duplicate is a hallucination loop, not a repeated line.
+      playerDroppedCues += 1;
+      continue;
+    }
+    if (cue.end - cue.start > MAX_CUE_SECONDS) {
+      cleaned.push({ ...cue, end: cue.start + MAX_CUE_SECONDS });
+      playerClampedCues += 1;
+    } else {
+      cleaned.push(cue);
+    }
+  }
+  return cleaned;
 }
 
 function formatCueTime(seconds: number): string {
@@ -1635,7 +1668,15 @@ function updatePlayerSummary() {
     return;
   }
   const dialogue = dialogueOnlyDuration();
-  let summary = `${playerCues.length} cues · dialogue only ≈ ${formatCueTime(dialogue)}`;
+  let summary = `${playerCues.length} cues`;
+  const cleanupParts = [
+    playerDroppedCues > 0 ? `${playerDroppedCues} removed` : "",
+    playerClampedCues > 0 ? `${playerClampedCues} shortened` : "",
+  ].filter(Boolean);
+  if (cleanupParts.length > 0) {
+    summary += ` (${cleanupParts.join(", ")})`;
+  }
+  summary += ` · dialogue only ≈ ${formatCueTime(dialogue)}`;
   const total = playerVideo.duration;
   if (Number.isFinite(total) && total > 0) {
     summary += ` of ${formatCueTime(total)} (${Math.round((dialogue / total) * 100)}%)`;
@@ -1677,7 +1718,7 @@ function renderPlayerCues() {
 async function loadPlayerSubtitleFile(path: string) {
   try {
     const content = await invoke<string>("read_subtitle_file", { options: { path } });
-    playerCues = parseSubtitles(content);
+    playerCues = cleanCues(parseSubtitles(content));
     renderPlayerCues();
   } catch (error) {
     playerCues = [];
