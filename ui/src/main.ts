@@ -617,6 +617,10 @@ app.innerHTML = `
     </section>
 
     <aside class="side-panel">
+      <section id="pipeline-panel" class="progress-panel">
+        <span class="eyebrow">Pipeline</span>
+        <ol id="phase-list" class="phase-list"></ol>
+      </section>
       <section id="player-source-panel" class="player-source-panel" hidden>
         <span class="eyebrow">Source</span>
         <div class="file-row">
@@ -632,10 +636,6 @@ app.innerHTML = `
           </button>
         </div>
         <p id="player-note" class="field-note"></p>
-      </section>
-      <section id="pipeline-panel" class="progress-panel">
-        <span class="eyebrow">Pipeline</span>
-        <ol id="phase-list" class="phase-list"></ol>
       </section>
       <section class="log-panel">
         <div class="log-heading">
@@ -739,7 +739,6 @@ const transcribeModelDownloadButton = byId<HTMLButtonElement>("transcribe-model-
 const transcribeModelDeleteButton = byId<HTMLButtonElement>("transcribe-model-delete");
 const converterModeNote = byId<HTMLElement>("converter-mode-note");
 const playerSourcePanel = byId<HTMLElement>("player-source-panel");
-const pipelinePanel = byId<HTMLElement>("pipeline-panel");
 const playerVideoPath = byId<HTMLInputElement>("player-video-path");
 const playerVideoBrowse = byId<HTMLButtonElement>("player-video-browse");
 const playerSubtitle = byId<HTMLSelectElement>("player-subtitle");
@@ -855,9 +854,7 @@ function setActiveWorkflow(workflow: Workflow) {
   for (const [name, panel] of Object.entries(workflowPanels)) {
     panel.classList.toggle("active", name === workflow);
   }
-  // The player has no pipeline; its file pickers take that sidebar spot.
   playerSourcePanel.hidden = workflow !== "player";
-  pipelinePanel.hidden = workflow === "player";
   renderPhases();
 }
 
