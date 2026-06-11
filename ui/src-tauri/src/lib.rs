@@ -14,6 +14,7 @@ mod events;
 mod gallery;
 mod grabber;
 mod media;
+mod media_server;
 mod player;
 mod process;
 mod runtime;
@@ -160,6 +161,17 @@ fn delete_whisper_model(
     delete_model(&app, &options.model)
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ServeMediaOptions {
+    path: String,
+}
+
+#[tauri::command]
+fn serve_media(options: ServeMediaOptions) -> Result<String, String> {
+    media_server::serve_media(std::path::Path::new(options.path.trim()))
+}
+
 #[tauri::command]
 fn list_subtitle_files(options: SubtitleListOptions) -> Vec<SubtitleFile> {
     player::list_subtitle_files(std::path::Path::new(options.video_path.trim()))
@@ -290,6 +302,7 @@ pub fn run() {
             list_whisper_models,
             start_model_download,
             delete_whisper_model,
+            serve_media,
             list_subtitle_files,
             read_subtitle_file,
             probe_grab,

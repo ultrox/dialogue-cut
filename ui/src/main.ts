@@ -1,4 +1,4 @@
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
@@ -1666,13 +1666,19 @@ async function loadPlayerSubtitleOptions(videoPath: string) {
   }
 }
 
-function loadPlayerVideo(path: string) {
+async function loadPlayerVideo(path: string) {
   playerVideoPath.value = path;
-  playerVideo.src = convertFileSrc(path);
   const extension = path.split(".").pop()?.toLowerCase() ?? "";
   playerNote.textContent = ["mp4", "m4v", "mov"].includes(extension)
     ? ""
     : "This container may not play in the built-in player; convert it to MP4 in the Converter tab first.";
+  try {
+    // Streamed over a local HTTP server; the asset protocol cannot handle
+    // multi-gigabyte videos on macOS.
+    playerVideo.src = await invoke<string>("serve_media", { options: { path } });
+  } catch (error) {
+    playerNote.textContent = String(error);
+  }
 }
 
 async function choosePlayerVideo() {
@@ -1682,7 +1688,7 @@ async function choosePlayerVideo() {
     filters: [{ name: "Video", extensions: videoExtensions }],
   });
   if (typeof selected === "string") {
-    loadPlayerVideo(selected);
+    await loadPlayerVideo(selected);
     await loadPlayerSubtitleOptions(selected);
   }
 }
@@ -1737,9 +1743,19 @@ playerVideoBrowse.addEventListener("click", () => void choosePlayerVideo());
 playerVideoPath.addEventListener("change", () => {
   const path = playerVideoPath.value.trim();
   if (path) {
-    loadPlayerVideo(path);
+    void loadPlayerVideo(path);
     void loadPlayerSubtitleOptions(path);
   }
+});
+playerVideo.addEventListener("error", () => {
+  const mediaError = playerVideo.error;
+  if (!mediaError) {
+    return;
+  }
+  playerNote.textContent =
+    mediaError.code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED || mediaError.code === MediaError.MEDIA_ERR_DECODE
+      ? "This video format is not supported by the built-in player. Convert it to MP4 (H.264/AAC) in the Converter tab first."
+      : `Could not play this video (media error ${mediaError.code}).`;
 });
 playerSubtitleBrowse.addEventListener("click", () => void choosePlayerSubtitle());
 playerSubtitle.addEventListener("change", () => {
