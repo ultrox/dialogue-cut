@@ -48,6 +48,26 @@ struct ConversionOptions {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct SubtitleProjectOptions {
+    project_path: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveSubtitleProjectOptions {
+    project_path: String,
+    project: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RenderSubtitleProjectOptions {
+    project_path: String,
+    output_path: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SlowdownOptions {
     video_path: String,
     speed: f64,
@@ -112,6 +132,15 @@ struct MaterialVideo {
     size_bytes: Option<u64>,
     modified: Option<u64>,
     thumbnail_data_url: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SubtitleProjectData {
+    project_path: String,
+    video_path: String,
+    output_path: String,
+    project: serde_json::Value,
 }
 
 #[derive(Clone, Serialize)]
@@ -215,6 +244,10 @@ fn media_tools_ready(paths: &ProcessorPaths) -> bool {
     paths.tools_dir.join("ffmpeg").is_file() && paths.tools_dir.join("ffprobe").is_file()
 }
 
+fn python_media_ready(paths: &ProcessorPaths) -> bool {
+    paths.python.is_file() && paths.script.is_file() && media_tools_ready(paths)
+}
+
 fn yt_dlp_ready(paths: &ProcessorPaths) -> bool {
     paths.python.is_file()
         && Command::new(&paths.python)
@@ -271,6 +304,23 @@ fn output_path_for(video_path: &Path) -> Result<PathBuf, String> {
         .and_then(|value| value.to_str())
         .ok_or("The selected video filename is invalid.")?;
     Ok(video_path.with_file_name(format!("{stem}.dialogue-only.mp4")))
+}
+
+fn project_path_for(video_path: &Path) -> Result<PathBuf, String> {
+    let stem = video_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .ok_or("The selected video filename is invalid.")?;
+    Ok(video_path.with_file_name(format!("{stem}.dialogue-project.json")))
+}
+
+fn output_path_for_project(project_path: &Path) -> Result<PathBuf, String> {
+    let stem = project_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .ok_or("The selected project filename is invalid.")?;
+    let base = stem.strip_suffix(".dialogue-project").unwrap_or(stem);
+    Ok(project_path.with_file_name(format!("{base}.dialogue-only.reviewed.mp4")))
 }
 
 fn output_path_for_slowdown(video_path: &Path, speed: f64) -> Result<PathBuf, String> {
@@ -370,6 +420,8 @@ fn phase_for_line(line: &str) -> Option<(&'static str, &'static str)> {
         Some(("transcribe", "Transcribing German dialogue"))
     } else if lower.contains("creating editable dialogue project") {
         Some(("filter", "Building strict dialogue ranges"))
+    } else if lower.contains("subtitle project:") {
+        Some(("filter", "Subtitle project is ready"))
     } else if lower.contains("rendering segment") {
         Some(("render", "Rendering QuickTime-safe segments"))
     } else if lower.contains("parts concat") {
@@ -813,6 +865,35 @@ fn ensure_private_media_tools(
     }
 }
 
+fn ensure_private_python_media(
+    app: &AppHandle,
+    state: &ConversionState,
+) -> Result<ProcessorPaths, String> {
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    return Err("This packaged build currently supports Apple Silicon Macs only.".into());
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        let paths = private_processor_paths(app)?;
+        if python_media_ready(&paths) {
+            return Ok(paths);
+        }
+
+        emit_status(
+            app,
+            "running",
+            "setup",
+            "Preparing private render tools",
+            None,
+        );
+        let data_dir = app_data_dir(app)?;
+        install_python(app, state, &paths, &data_dir)?;
+        install_static_tool(app, state, &paths, "ffmpeg", FFMPEG_URL, FFMPEG_SHA256)?;
+        install_static_tool(app, state, &paths, "ffprobe", FFPROBE_URL, FFPROBE_SHA256)?;
+        Ok(paths)
+    }
+}
+
 fn ensure_private_download_tools(
     app: &AppHandle,
     state: &ConversionState,
@@ -857,6 +938,14 @@ fn media_paths(app: &AppHandle, state: &ConversionState) -> Result<ProcessorPath
         return Ok(local);
     }
     ensure_private_media_tools(app, state)
+}
+
+fn python_media_paths(app: &AppHandle, state: &ConversionState) -> Result<ProcessorPaths, String> {
+    let local = local_processor_paths();
+    if cfg!(debug_assertions) && python_media_ready(&local) {
+        return Ok(local);
+    }
+    ensure_private_python_media(app, state)
 }
 
 enum DownloadRunner {
@@ -1225,10 +1314,23 @@ fn list_material_videos_inner(
         .collect())
 }
 
-fn run_conversion(
+fn dialogue_project_script(paths: &ProcessorPaths) -> Result<PathBuf, String> {
+    let script = paths.script.with_file_name("dialogue_project.py");
+    if script.is_file() {
+        Ok(script)
+    } else {
+        Err(format!(
+            "Dialogue project processor not found at {}.",
+            script.display()
+        ))
+    }
+}
+
+fn run_dialogue_processor(
     app: &AppHandle,
     state: &ConversionState,
     options: &ConversionOptions,
+    project_only: bool,
 ) -> Result<(), String> {
     let video_path = PathBuf::from(&options.video_path);
     let paths = processor_paths(app, state)?;
@@ -1259,6 +1361,51 @@ fn run_conversion(
     if options.force_transcribe {
         command.arg("--force-transcribe");
     }
+    if project_only {
+        command.arg("--project-only");
+    }
+    prepend_runtime_path(&mut command, &paths);
+    run_logged_command(app, state, &mut command)
+}
+
+fn run_conversion(
+    app: &AppHandle,
+    state: &ConversionState,
+    options: &ConversionOptions,
+) -> Result<(), String> {
+    run_dialogue_processor(app, state, options, false)
+}
+
+fn run_project_prepare(
+    app: &AppHandle,
+    state: &ConversionState,
+    options: &ConversionOptions,
+) -> Result<(), String> {
+    run_dialogue_processor(app, state, options, true)
+}
+
+fn run_project_render(
+    app: &AppHandle,
+    state: &ConversionState,
+    project_path: &Path,
+    output_path: &Path,
+) -> Result<(), String> {
+    let paths = python_media_paths(app, state)?;
+    let script = dialogue_project_script(&paths)?;
+
+    emit_status(
+        app,
+        "running",
+        "render",
+        "Rendering saved subtitle project",
+        Some(output_path),
+    );
+    let mut command = Command::new(&paths.python);
+    command
+        .arg(script)
+        .arg("render")
+        .arg(project_path)
+        .arg(output_path);
     prepend_runtime_path(&mut command, &paths);
     run_logged_command(app, state, &mut command)
 }
@@ -1364,6 +1511,195 @@ fn run_grab(
 #[tauri::command]
 fn get_runtime_status(app: AppHandle) -> RuntimeStatus {
     runtime_status_inner(&app)
+}
+
+#[tauri::command]
+fn start_project_prepare(
+    app: AppHandle,
+    state: State<'_, ConversionState>,
+    options: ConversionOptions,
+) -> Result<String, String> {
+    if state.running.swap(true, Ordering::SeqCst) {
+        return Err("A conversion is already running.".into());
+    }
+    state.cancel_requested.store(false, Ordering::SeqCst);
+
+    let video_path = PathBuf::from(&options.video_path);
+    if !video_path.is_file() {
+        state.running.store(false, Ordering::SeqCst);
+        return Err("Choose an existing video file first.".into());
+    }
+    let project_path = project_path_for(&video_path).map_err(|error| {
+        state.running.store(false, Ordering::SeqCst);
+        error
+    })?;
+
+    emit_status(
+        &app,
+        "running",
+        "setup",
+        "Checking the private runtime",
+        Some(&project_path),
+    );
+    let app_for_run = app.clone();
+    let project_for_run = project_path.clone();
+    thread::spawn(move || {
+        let state = app_for_run.state::<ConversionState>();
+        let result = run_project_prepare(&app_for_run, &state, &options);
+        state.running.store(false, Ordering::SeqCst);
+        let _ = set_child_pid(&state, None);
+
+        match result {
+            Ok(()) => emit_status(
+                &app_for_run,
+                "complete",
+                "complete",
+                "Subtitle project is ready",
+                Some(&project_for_run),
+            ),
+            Err(error) => {
+                emit_log(&app_for_run, "stderr", &error);
+                emit_status(
+                    &app_for_run,
+                    "error",
+                    "error",
+                    &error,
+                    Some(&project_for_run),
+                );
+            }
+        }
+    });
+
+    Ok(project_path.display().to_string())
+}
+
+#[tauri::command]
+fn load_subtitle_project(options: SubtitleProjectOptions) -> Result<SubtitleProjectData, String> {
+    let raw_project_path = options.project_path.trim();
+    if raw_project_path.is_empty() {
+        return Err("Choose an existing subtitle project first.".into());
+    }
+    let project_path = PathBuf::from(raw_project_path);
+    if !project_path.is_file() {
+        return Err("Choose an existing subtitle project first.".into());
+    }
+
+    let text = fs::read_to_string(&project_path)
+        .map_err(|error| format!("Could not read {}: {error}", project_path.display()))?;
+    let project: serde_json::Value =
+        serde_json::from_str(&text).map_err(|error| format!("Project JSON is invalid: {error}"))?;
+    if !project
+        .get("segments")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|segments| !segments.is_empty())
+    {
+        return Err("Project does not contain editable segments.".into());
+    }
+
+    let video_path = project
+        .get("video")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let output_path = output_path_for_project(&project_path)?;
+
+    Ok(SubtitleProjectData {
+        project_path: project_path.display().to_string(),
+        video_path,
+        output_path: output_path.display().to_string(),
+        project,
+    })
+}
+
+#[tauri::command]
+fn save_subtitle_project(options: SaveSubtitleProjectOptions) -> Result<(), String> {
+    let raw_project_path = options.project_path.trim();
+    if raw_project_path.is_empty() {
+        return Err("Choose a project path first.".into());
+    }
+    let project_path = PathBuf::from(raw_project_path);
+    if !options
+        .project
+        .get("segments")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|segments| !segments.is_empty())
+    {
+        return Err("Project does not contain editable segments.".into());
+    }
+    let text = serde_json::to_string_pretty(&options.project)
+        .map_err(|error| format!("Could not serialize project: {error}"))?;
+    fs::write(&project_path, format!("{text}\n"))
+        .map_err(|error| format!("Could not save {}: {error}", project_path.display()))
+}
+
+#[tauri::command]
+fn start_project_render(
+    app: AppHandle,
+    state: State<'_, ConversionState>,
+    options: RenderSubtitleProjectOptions,
+) -> Result<String, String> {
+    if state.running.swap(true, Ordering::SeqCst) {
+        return Err("A process is already running.".into());
+    }
+    state.cancel_requested.store(false, Ordering::SeqCst);
+
+    let raw_project_path = options.project_path.trim();
+    if raw_project_path.is_empty() {
+        state.running.store(false, Ordering::SeqCst);
+        return Err("Choose an existing subtitle project first.".into());
+    }
+    let project_path = PathBuf::from(raw_project_path);
+    if !project_path.is_file() {
+        state.running.store(false, Ordering::SeqCst);
+        return Err("Choose an existing subtitle project first.".into());
+    }
+    let output_path = if options.output_path.trim().is_empty() {
+        output_path_for_project(&project_path).map_err(|error| {
+            state.running.store(false, Ordering::SeqCst);
+            error
+        })?
+    } else {
+        PathBuf::from(options.output_path.trim())
+    };
+
+    emit_status(
+        &app,
+        "running",
+        "setup",
+        "Checking the private runtime",
+        Some(&output_path),
+    );
+    let app_for_run = app.clone();
+    let project_for_run = project_path.clone();
+    let output_for_run = output_path.clone();
+    thread::spawn(move || {
+        let state = app_for_run.state::<ConversionState>();
+        let result = run_project_render(&app_for_run, &state, &project_for_run, &output_for_run);
+        state.running.store(false, Ordering::SeqCst);
+        let _ = set_child_pid(&state, None);
+
+        match result {
+            Ok(()) => emit_status(
+                &app_for_run,
+                "complete",
+                "complete",
+                "Committed dialogue MP4 is ready",
+                Some(&output_for_run),
+            ),
+            Err(error) => {
+                emit_log(&app_for_run, "stderr", &error);
+                emit_status(
+                    &app_for_run,
+                    "error",
+                    "error",
+                    &error,
+                    Some(&output_for_run),
+                );
+            }
+        }
+    });
+
+    Ok(output_path.display().to_string())
 }
 
 #[tauri::command]
@@ -1635,6 +1971,10 @@ pub fn run() {
             get_runtime_status,
             get_default_grab_output_dir,
             list_material_videos,
+            start_project_prepare,
+            load_subtitle_project,
+            save_subtitle_project,
+            start_project_render,
             start_conversion,
             start_slowdown,
             probe_grab,

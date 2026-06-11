@@ -27,6 +27,12 @@ npm run tauri dev
 python3 dialogue-only.py /path/to/movie.mkv
 ```
 
+Create only the editable subtitle project, with no video cutting:
+
+```bash
+python3 dialogue-only.py /path/to/movie.mkv --project-only
+```
+
 Force a fresh German Whisper transcript:
 
 ```bash
@@ -37,6 +43,23 @@ Tune the cut feel:
 
 ```bash
 python3 dialogue-only.py /path/to/movie.mkv --pre-pad 0.3 --post-pad 0.5 --merge-gap 1.0
+```
+
+## Subtitle-First Review
+
+In the desktop app, use `Dialogue cut` -> `Prepare project` to create the
+cheap editable plan first. This writes:
+
+```txt
+movie.dialogue-project.json
+```
+
+The app then opens `Subtitle project`, where each segment can be kept, dropped,
+or trimmed from either side. The kept runtime updates immediately. Nothing is
+cut until `Commit render`, which saves the project and renders:
+
+```txt
+movie.dialogue-only.reviewed.mp4
 ```
 
 ## Slow-Down Transcode
