@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
@@ -13,14 +13,19 @@ import {
   LoaderCircle,
   Play,
   RefreshCw,
+  RotateCcw,
   Settings2,
+  SkipBack,
+  SkipForward,
   Square,
   Terminal,
   Trash2,
   createIcons,
 } from "lucide";
 
-type Workflow = "dialogue" | "processing" | "converter" | "transcribe" | "grabber";
+// Workflows that run backend jobs and report status/output into a run block.
+type JobWorkflow = "dialogue" | "processing" | "converter" | "transcribe" | "grabber";
+type Workflow = JobWorkflow | "player";
 
 type ConversionStatus = {
   status: "idle" | "running" | "complete" | "error";
@@ -113,11 +118,13 @@ const workflowPhases: Record<Workflow, readonly (readonly [string, string])[]> =
     ["download", "Download material"],
     ["subtitles", "Save subtitles"],
   ],
+  // The player is interactive; it has no pipeline.
+  player: [],
 };
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
 let activeWorkflow: Workflow = "dialogue";
-let runningWorkflow: Workflow | null = null;
+let runningWorkflow: JobWorkflow | null = null;
 let currentStatus: ConversionStatus = {
   status: "idle",
   phase: "inspect",
@@ -156,6 +163,10 @@ app.innerHTML = `
         <button id="transcribe-tab" class="tab-button" type="button">
           <i data-lucide="captions"></i>
           <span>Transcription</span>
+        </button>
+        <button id="player-tab" class="tab-button" type="button">
+          <i data-lucide="play"></i>
+          <span>Player</span>
         </button>
         <button id="grabber-tab" class="tab-button" type="button">
           <i data-lucide="hard-drive-download"></i>
@@ -487,6 +498,78 @@ app.innerHTML = `
         </section>
       </div>
 
+      <div id="player-panel" class="tab-panel">
+        <section class="section-block source-block">
+          <div class="section-heading">
+            <div>
+              <span class="eyebrow">Source</span>
+              <h2>Select a video and subtitles</h2>
+            </div>
+            <i data-lucide="file-text"></i>
+          </div>
+          <div class="file-row">
+            <input id="player-video-path" type="text" placeholder="/path/to/movie.mp4" spellcheck="false" />
+            <button id="player-video-browse" class="icon-button" type="button" title="Choose video">
+              <i data-lucide="folder-open"></i>
+            </button>
+          </div>
+          <div class="file-row subtitle-row">
+            <select id="player-subtitle"></select>
+            <button id="player-subtitle-browse" class="icon-button" type="button" title="Choose subtitle file">
+              <i data-lucide="folder-open"></i>
+            </button>
+          </div>
+          <p id="player-note" class="field-note"></p>
+        </section>
+
+        <section class="section-block">
+          <video id="player-video" class="player-video" controls preload="metadata"></video>
+          <div class="player-controls">
+            <label class="player-offset">
+              <span>Jump offset</span>
+              <div class="number-field">
+                <input id="player-offset" type="number" min="0" max="5" step="0.1" value="0.5" />
+                <em>s</em>
+              </div>
+            </label>
+            <div class="preset-row player-offset-presets">
+              <button class="offset-preset preset-button" type="button" data-offset="0">0s</button>
+              <button class="offset-preset preset-button active" type="button" data-offset="0.5">0.5s</button>
+              <button class="offset-preset preset-button" type="button" data-offset="1">1s</button>
+              <button class="offset-preset preset-button" type="button" data-offset="2">2s</button>
+            </div>
+            <div class="cue-nav">
+              <button id="player-prev-cue" class="secondary-button" type="button" title="Previous cue">
+                <i data-lucide="skip-back"></i>
+              </button>
+              <button id="player-replay-cue" class="secondary-button" type="button" title="Replay cue">
+                <i data-lucide="rotate-ccw"></i>
+              </button>
+              <button id="player-next-cue" class="secondary-button" type="button" title="Next cue">
+                <i data-lucide="skip-forward"></i>
+              </button>
+            </div>
+            <label class="checkbox-label follow-toggle">
+              <input id="player-follow" type="checkbox" checked />
+              <span>Follow playback</span>
+            </label>
+          </div>
+        </section>
+
+        <section class="section-block">
+          <div class="section-heading">
+            <div>
+              <span class="eyebrow">Subtitles</span>
+              <h2 id="player-cue-count">No cues loaded</h2>
+            </div>
+            <i data-lucide="captions"></i>
+          </div>
+          <div id="player-cues" class="cue-list">
+            <p class="empty-note">Choose a video to load its subtitles.</p>
+          </div>
+        </section>
+      </div>
+
       <div id="grabber-panel" class="tab-panel">
         <section class="section-block source-block">
           <div class="section-heading">
@@ -581,7 +664,10 @@ createIcons({
     LoaderCircle,
     Play,
     RefreshCw,
+    RotateCcw,
     Settings2,
+    SkipBack,
+    SkipForward,
     Square,
     Terminal,
     Trash2,
@@ -597,6 +683,7 @@ const workflowTabs: Record<Workflow, HTMLButtonElement> = {
   processing: byId("processing-tab"),
   converter: byId("converter-tab"),
   transcribe: byId("transcribe-tab"),
+  player: byId("player-tab"),
   grabber: byId("grabber-tab"),
 };
 const workflowPanels: Record<Workflow, HTMLElement> = {
@@ -604,16 +691,17 @@ const workflowPanels: Record<Workflow, HTMLElement> = {
   processing: byId("processing-panel"),
   converter: byId("converter-panel"),
   transcribe: byId("transcribe-panel"),
+  player: byId("player-panel"),
   grabber: byId("grabber-panel"),
 };
-const workflowRunMessages: Record<Workflow, HTMLElement> = {
+const workflowRunMessages: Record<JobWorkflow, HTMLElement> = {
   dialogue: byId("dialogue-run-message"),
   processing: byId("processing-run-message"),
   converter: byId("converter-run-message"),
   transcribe: byId("transcribe-run-message"),
   grabber: byId("grabber-run-message"),
 };
-const workflowOutputPaths: Record<Workflow, HTMLElement> = {
+const workflowOutputPaths: Record<JobWorkflow, HTMLElement> = {
   dialogue: byId("dialogue-output-path"),
   processing: byId("processing-output-path"),
   converter: byId("converter-output-path"),
@@ -650,6 +738,22 @@ const transcribeModel = byId<HTMLSelectElement>("transcribe-model");
 const transcribeModelDownloadButton = byId<HTMLButtonElement>("transcribe-model-download");
 const transcribeModelDeleteButton = byId<HTMLButtonElement>("transcribe-model-delete");
 const converterModeNote = byId<HTMLElement>("converter-mode-note");
+const playerVideoPath = byId<HTMLInputElement>("player-video-path");
+const playerVideoBrowse = byId<HTMLButtonElement>("player-video-browse");
+const playerSubtitle = byId<HTMLSelectElement>("player-subtitle");
+const playerSubtitleBrowse = byId<HTMLButtonElement>("player-subtitle-browse");
+const playerNote = byId<HTMLElement>("player-note");
+const playerVideo = byId<HTMLVideoElement>("player-video");
+const playerOffsetInput = byId<HTMLInputElement>("player-offset");
+const playerFollow = byId<HTMLInputElement>("player-follow");
+const playerPrevCue = byId<HTMLButtonElement>("player-prev-cue");
+const playerReplayCue = byId<HTMLButtonElement>("player-replay-cue");
+const playerNextCue = byId<HTMLButtonElement>("player-next-cue");
+const playerCueCount = byId<HTMLElement>("player-cue-count");
+const playerCueList = byId<HTMLElement>("player-cues");
+const offsetPresetButtons = Array.from(
+  document.querySelectorAll<HTMLButtonElement>(".offset-preset"),
+);
 type ProgressElements = {
   track: HTMLElement;
   fill: HTMLElement;
@@ -789,10 +893,11 @@ function setStatus(status: ConversionStatus) {
           ? "Running"
           : "Ready";
 
-  const runMessage = workflowRunMessages[workflow];
-  const outputPath = workflowOutputPaths[workflow];
-  runMessage.textContent = status.message;
-  outputPath.textContent = status.outputPath ?? (workflow === "grabber" ? grabOutputDir.value.trim() : "");
+  if (workflow !== "player") {
+    workflowRunMessages[workflow].textContent = status.message;
+    workflowOutputPaths[workflow].textContent =
+      status.outputPath ?? (workflow === "grabber" ? grabOutputDir.value.trim() : "");
+  }
   if (!running) {
     resetRunProgress();
   }
@@ -1134,6 +1239,7 @@ workflowTabs.processing.addEventListener("click", () => {
 });
 workflowTabs.converter.addEventListener("click", () => setActiveWorkflow("converter"));
 workflowTabs.transcribe.addEventListener("click", () => setActiveWorkflow("transcribe"));
+workflowTabs.player.addEventListener("click", () => setActiveWorkflow("player"));
 workflowTabs.grabber.addEventListener("click", () => setActiveWorkflow("grabber"));
 dialogueBrowseButton.addEventListener("click", () => chooseVideo(dialogueVideoPath, "dialogue"));
 processingBrowseButton.addEventListener("click", () =>
@@ -1183,7 +1289,7 @@ convertModeButtons.forEach((button) => {
 
 // Shared lifecycle for every start button: focus the workflow, clear the log,
 // invoke the backend command, and show its expected output path (or the error).
-async function startRun(workflow: Workflow, command: string, options: Record<string, unknown>) {
+async function startRun(workflow: JobWorkflow, command: string, options: Record<string, unknown>) {
   setActiveWorkflow(workflow);
   runningWorkflow = workflow;
   logOutput.textContent = "";
@@ -1385,6 +1491,278 @@ grabberStartButton.addEventListener("click", async () => {
   }
 });
 
+// ---------- Subtitle player ----------
+
+type SubtitleFileEntry = { path: string; fileName: string };
+type SubtitleCue = { start: number; end: number; text: string };
+
+let playerCues: SubtitleCue[] = [];
+let playerCueButtons: HTMLButtonElement[] = [];
+let playerActiveCue = -1;
+let playerOffset = 0.5;
+
+function parseSubtitleTimestamp(raw: string): number | null {
+  const match = raw.trim().match(/^(?:(\d+):)?(\d{1,2}):(\d{2})[.,](\d{1,3})$/);
+  if (!match) {
+    return null;
+  }
+  const hours = Number(match[1] ?? 0);
+  const minutes = Number(match[2]);
+  const seconds = Number(match[3]);
+  const millis = Number(match[4].padEnd(3, "0"));
+  return hours * 3600 + minutes * 60 + seconds + millis / 1000;
+}
+
+// Handles both SRT and WebVTT: blocks separated by blank lines, one
+// "start --> end" timing line per block, optional index line and cue settings.
+function parseSubtitles(content: string): SubtitleCue[] {
+  const cues: SubtitleCue[] = [];
+  const blocks = content.replace(/^﻿/, "").replace(/\r/g, "").split(/\n{2,}/);
+  for (const block of blocks) {
+    const lines = block.split("\n");
+    const timingIndex = lines.findIndex((line) => line.includes("-->"));
+    if (timingIndex === -1) {
+      continue;
+    }
+    const [rawStart, rawRest] = lines[timingIndex].split("-->");
+    const start = parseSubtitleTimestamp(rawStart ?? "");
+    const end = parseSubtitleTimestamp(rawRest?.trim().split(/\s+/)[0] ?? "");
+    if (start === null || end === null) {
+      continue;
+    }
+    const text = lines
+      .slice(timingIndex + 1)
+      .join(" ")
+      .replace(/<[^>]*>/g, "")
+      .trim();
+    if (text) {
+      cues.push({ start, end, text });
+    }
+  }
+  cues.sort((a, b) => a.start - b.start);
+  return cues;
+}
+
+function formatCueTime(seconds: number): string {
+  const total = Math.max(0, Math.floor(seconds));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const secs = total % 60;
+  return hours > 0
+    ? `${hours}:${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`
+    : `${minutes}:${String(secs).padStart(2, "0")}`;
+}
+
+function cueIndexAt(time: number): number {
+  let low = 0;
+  let high = playerCues.length - 1;
+  let candidate = -1;
+  while (low <= high) {
+    const mid = (low + high) >> 1;
+    if (playerCues[mid].start <= time) {
+      candidate = mid;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+  if (candidate >= 0 && time <= playerCues[candidate].end + 0.05) {
+    return candidate;
+  }
+  return -1;
+}
+
+function seekToCue(index: number) {
+  const cue = playerCues[index];
+  if (!cue) {
+    return;
+  }
+  playerVideo.currentTime = Math.max(0, cue.start - playerOffset);
+  void playerVideo.play();
+}
+
+function setActivePlayerCue(index: number) {
+  if (index === playerActiveCue) {
+    return;
+  }
+  playerCueButtons[playerActiveCue]?.classList.remove("active");
+  playerActiveCue = index;
+  const button = playerCueButtons[index];
+  if (button) {
+    button.classList.add("active");
+    if (playerFollow.checked) {
+      button.scrollIntoView({ block: "nearest" });
+    }
+  }
+}
+
+function renderPlayerCues() {
+  playerCueList.replaceChildren();
+  playerCueButtons = [];
+  playerActiveCue = -1;
+  if (playerCues.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "empty-note";
+    empty.textContent = "No cues found in the selected subtitles.";
+    playerCueList.append(empty);
+    playerCueCount.textContent = "No cues loaded";
+    return;
+  }
+  playerCueCount.textContent = `${playerCues.length} cues`;
+  playerCues.forEach((cue, index) => {
+    const button = document.createElement("button");
+    button.className = "cue-row";
+    button.type = "button";
+    button.addEventListener("click", () => seekToCue(index));
+
+    const time = document.createElement("span");
+    time.className = "cue-time";
+    time.textContent = formatCueTime(cue.start);
+    const text = document.createElement("span");
+    text.className = "cue-text";
+    text.textContent = cue.text;
+
+    button.append(time, text);
+    playerCueList.append(button);
+    playerCueButtons.push(button);
+  });
+}
+
+async function loadPlayerSubtitleFile(path: string) {
+  try {
+    const content = await invoke<string>("read_subtitle_file", { options: { path } });
+    playerCues = parseSubtitles(content);
+    renderPlayerCues();
+  } catch (error) {
+    playerCues = [];
+    renderPlayerCues();
+    playerCueCount.textContent = "Could not load subtitles";
+    appendLog({ stream: "stderr", line: String(error) });
+  }
+}
+
+function addPlayerSubtitleOption(entry: SubtitleFileEntry, select = false) {
+  const option = document.createElement("option");
+  option.value = entry.path;
+  option.textContent = entry.fileName;
+  playerSubtitle.append(option);
+  if (select) {
+    playerSubtitle.value = entry.path;
+  }
+}
+
+async function loadPlayerSubtitleOptions(videoPath: string) {
+  playerSubtitle.replaceChildren();
+  const entries = await invoke<SubtitleFileEntry[]>("list_subtitle_files", {
+    options: { videoPath },
+  });
+  entries.forEach((entry, index) => addPlayerSubtitleOption(entry, index === 0));
+  if (entries.length > 0) {
+    await loadPlayerSubtitleFile(entries[0].path);
+  } else {
+    playerCues = [];
+    renderPlayerCues();
+    playerCueCount.textContent = "No subtitles found beside the video";
+  }
+}
+
+function loadPlayerVideo(path: string) {
+  playerVideoPath.value = path;
+  playerVideo.src = convertFileSrc(path);
+  const extension = path.split(".").pop()?.toLowerCase() ?? "";
+  playerNote.textContent = ["mp4", "m4v", "mov"].includes(extension)
+    ? ""
+    : "This container may not play in the built-in player; convert it to MP4 in the Converter tab first.";
+}
+
+async function choosePlayerVideo() {
+  const selected = await open({
+    multiple: false,
+    directory: false,
+    filters: [{ name: "Video", extensions: videoExtensions }],
+  });
+  if (typeof selected === "string") {
+    loadPlayerVideo(selected);
+    await loadPlayerSubtitleOptions(selected);
+  }
+}
+
+async function choosePlayerSubtitle() {
+  const selected = await open({
+    multiple: false,
+    directory: false,
+    filters: [{ name: "Subtitles", extensions: ["srt", "vtt"] }],
+  });
+  if (typeof selected === "string") {
+    const fileName = selected.split("/").pop() ?? selected;
+    addPlayerSubtitleOption({ path: selected, fileName }, true);
+    await loadPlayerSubtitleFile(selected);
+  }
+}
+
+function updatePlayerOffset(value: string) {
+  playerOffset = Math.min(5, Math.max(0, Number(value) || 0));
+  playerOffsetInput.value = playerOffset.toFixed(1);
+  offsetPresetButtons.forEach((button) => {
+    button.classList.toggle("active", Number(button.dataset.offset) === playerOffset);
+  });
+}
+
+function stepPlayerCue(direction: -1 | 1) {
+  if (playerCues.length === 0) {
+    return;
+  }
+  const time = playerVideo.currentTime;
+  let target: number;
+  if (direction === 1) {
+    target = playerCues.findIndex((cue) => cue.start > time + 0.05);
+    if (target === -1) {
+      return;
+    }
+  } else {
+    // A margin so that pressing back twice moves to the previous cue
+    // instead of restarting the current one each time.
+    target = playerCues.length - 1;
+    while (target >= 0 && playerCues[target].start >= time - 1) {
+      target -= 1;
+    }
+    if (target < 0) {
+      target = 0;
+    }
+  }
+  seekToCue(target);
+}
+
+playerVideoBrowse.addEventListener("click", () => void choosePlayerVideo());
+playerVideoPath.addEventListener("change", () => {
+  const path = playerVideoPath.value.trim();
+  if (path) {
+    loadPlayerVideo(path);
+    void loadPlayerSubtitleOptions(path);
+  }
+});
+playerSubtitleBrowse.addEventListener("click", () => void choosePlayerSubtitle());
+playerSubtitle.addEventListener("change", () => {
+  if (playerSubtitle.value) {
+    void loadPlayerSubtitleFile(playerSubtitle.value);
+  }
+});
+playerOffsetInput.addEventListener("input", () => updatePlayerOffset(playerOffsetInput.value));
+offsetPresetButtons.forEach((button) => {
+  button.addEventListener("click", () => updatePlayerOffset(button.dataset.offset ?? "0.5"));
+});
+playerPrevCue.addEventListener("click", () => stepPlayerCue(-1));
+playerNextCue.addEventListener("click", () => stepPlayerCue(1));
+playerReplayCue.addEventListener("click", () => {
+  const index = playerActiveCue >= 0 ? playerActiveCue : cueIndexAt(playerVideo.currentTime);
+  if (index >= 0) {
+    seekToCue(index);
+  }
+});
+playerVideo.addEventListener("timeupdate", () => {
+  setActivePlayerCue(cueIndexAt(playerVideo.currentTime));
+});
+
 async function stopCurrentRun() {
   try {
     await invoke("stop_conversion");
@@ -1410,6 +1788,7 @@ setActiveWorkflow(activeWorkflow);
 setStatus(currentStatus);
 updateSpeed(slowSpeed.value);
 updateConvertMode(convertMode);
+updatePlayerOffset(playerOffsetInput.value);
 void loadWhisperModels();
 invoke<string>("get_default_grab_output_dir")
   .then((path) => {

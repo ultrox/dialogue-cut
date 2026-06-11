@@ -14,6 +14,7 @@ mod events;
 mod gallery;
 mod grabber;
 mod media;
+mod player;
 mod process;
 mod runtime;
 mod slowdown;
@@ -30,6 +31,7 @@ use grabber::{
     default_grab_output_dir, probe_grab_inner, run_grab, subtitle_language_spec, GrabMetadata,
     GrabOptions, GrabProbeOptions,
 };
+use player::{SubtitleFile, SubtitleListOptions, SubtitleReadOptions};
 use process::{
     existing_file, set_child_pid, start_background_job, terminate_process, ConversionState,
 };
@@ -159,6 +161,16 @@ fn delete_whisper_model(
 }
 
 #[tauri::command]
+fn list_subtitle_files(options: SubtitleListOptions) -> Vec<SubtitleFile> {
+    player::list_subtitle_files(std::path::Path::new(options.video_path.trim()))
+}
+
+#[tauri::command]
+fn read_subtitle_file(options: SubtitleReadOptions) -> Result<String, String> {
+    player::read_subtitle_file(std::path::Path::new(options.path.trim()))
+}
+
+#[tauri::command]
 fn get_default_grab_output_dir() -> Result<String, String> {
     let output_dir = default_grab_output_dir();
     fs::create_dir_all(&output_dir)
@@ -278,6 +290,8 @@ pub fn run() {
             list_whisper_models,
             start_model_download,
             delete_whisper_model,
+            list_subtitle_files,
+            read_subtitle_file,
             probe_grab,
             start_grab,
             stop_conversion

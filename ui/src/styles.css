@@ -543,6 +543,100 @@ input:focus {
   gap: 8px;
 }
 
+.subtitle-row {
+  margin-top: 8px;
+}
+
+.player-video {
+  width: 100%;
+  max-height: 420px;
+  border-radius: 8px;
+  background: #0c1311;
+}
+
+.player-controls {
+  margin-top: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px;
+}
+
+.player-offset {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.player-offset > span {
+  color: #58675f;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.player-offset .number-field {
+  width: 90px;
+}
+
+.player-offset-presets {
+  margin-top: 0;
+}
+
+.cue-nav {
+  display: flex;
+  gap: 6px;
+}
+
+.cue-nav .secondary-button {
+  padding: 0 12px;
+}
+
+.follow-toggle {
+  margin-left: auto;
+}
+
+.cue-list {
+  max-height: 340px;
+  overflow-y: auto;
+  display: grid;
+  gap: 4px;
+}
+
+.cue-row {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 10px;
+  align-items: baseline;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  text-align: left;
+  background: #f1f6f3;
+  cursor: pointer;
+}
+
+.cue-row:hover {
+  border-color: #c8d2cd;
+}
+
+.cue-row.active {
+  background: #ddeee6;
+  border-color: #4b8b7a;
+}
+
+.cue-time {
+  color: #58675f;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+
+.cue-text {
+  color: #1d2925;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
 .progress-track {
   margin-top: 14px;
   height: 8px;
