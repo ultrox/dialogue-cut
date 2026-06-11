@@ -375,12 +375,6 @@ fn modified_seconds(path: &Path) -> Option<u64> {
         .map(|duration| duration.as_secs())
 }
 
-fn is_nonempty_file(path: &Path) -> bool {
-    fs::metadata(path)
-        .map(|metadata| metadata.is_file() && metadata.len() > 0)
-        .unwrap_or(false)
-}
-
 fn base64_encode(bytes: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
@@ -1463,9 +1457,6 @@ fn run_preview_proxy(
         "Building browser preview MP4",
         Some(output_path),
     );
-    let temporary_path = output_path.with_extension("tmp.mp4");
-    let _ = fs::remove_file(&temporary_path);
-
     let mut command = Command::new(ffmpeg);
     command
         .arg("-hide_banner")
@@ -1475,7 +1466,10 @@ fn run_preview_proxy(
         .args(["-map", "0:v:0"])
         .args(["-map", "0:a:0?"])
         .arg("-sn")
-        .args(["-vf", "scale=w='min(1280,iw)':h=-2,format=yuv420p"])
+        .args([
+            "-vf",
+            "scale=1280:-2:force_original_aspect_ratio=decrease,format=yuv420p",
+        ])
         .args(["-c:v", "libx264"])
         .args(["-preset", "veryfast"])
         .args(["-crf", "28"])
@@ -1484,16 +1478,9 @@ fn run_preview_proxy(
         .args(["-c:a", "aac"])
         .args(["-b:a", "128k"])
         .args(["-movflags", "+faststart"])
-        .arg(&temporary_path);
+        .arg(output_path);
     prepend_media_path(&mut command, &paths);
-    let result = run_logged_command(app, state, &mut command);
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary_path);
-        return result;
-    }
-    let _ = fs::remove_file(output_path);
-    fs::rename(&temporary_path, output_path)
-        .map_err(|error| format!("Could not save preview MP4: {error}"))
+    run_logged_command(app, state, &mut command)
 }
 
 fn run_slowdown(
@@ -1693,7 +1680,7 @@ fn load_subtitle_project(options: SubtitleProjectOptions) -> Result<SubtitleProj
     } else {
         preview_proxy_path_for(&PathBuf::from(&video_path))?
     };
-    let preview_ready = is_nonempty_file(&preview_path);
+    let preview_ready = preview_path.is_file();
 
     Ok(SubtitleProjectData {
         project_path: project_path.display().to_string(),
