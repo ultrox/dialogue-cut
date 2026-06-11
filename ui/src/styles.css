@@ -536,9 +536,11 @@ input:focus {
   align-content: start;
 }
 
-.model-download-button {
-  width: 100%;
+.model-actions {
   margin-top: 8px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
 }
 
 .progress-track {

@@ -110,6 +110,17 @@ pub(crate) fn validated_model(id: &str) -> Result<String, String> {
     model_entry(id).map(|(model_id, _, _)| (*model_id).to_string())
 }
 
+pub(crate) fn delete_model(app: &AppHandle, id: &str) -> Result<(), String> {
+    let model = validated_model(id)?;
+    let hf_home = probe_processor_paths(app)?.hf_home;
+    let cache_dir = model_cache_dir(&hf_home, &model);
+    if !cache_dir.exists() {
+        return Ok(());
+    }
+    fs::remove_dir_all(&cache_dir)
+        .map_err(|error| format!("Could not delete {}: {error}", cache_dir.display()))
+}
+
 fn dir_size(path: &Path) -> u64 {
     let Ok(entries) = fs::read_dir(path) else {
         return 0;

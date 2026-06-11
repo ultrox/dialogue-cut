@@ -37,9 +37,9 @@ use runtime::runtime_status_inner;
 use slowdown::{output_path_for_slowdown, run_slowdown, SlowdownOptions};
 use runtime::probe_processor_paths;
 use transcribe::{
-    list_models, model_cache_dir, normalized_formats, run_model_download, run_transcribe,
-    transcript_base_name, validated_model, ModelDownloadOptions, TranscribeOptions,
-    WhisperModelInfo,
+    delete_model, list_models, model_cache_dir, normalized_formats, run_model_download,
+    run_transcribe, transcript_base_name, validated_model, ModelDownloadOptions,
+    TranscribeOptions, WhisperModelInfo,
 };
 
 #[tauri::command]
@@ -144,6 +144,18 @@ fn start_model_download(
         output_path,
         move |app, state| run_model_download(app, state, &model),
     )
+}
+
+#[tauri::command]
+fn delete_whisper_model(
+    app: AppHandle,
+    state: State<'_, ConversionState>,
+    options: ModelDownloadOptions,
+) -> Result<(), String> {
+    if state.running.load(Ordering::SeqCst) {
+        return Err("Wait for the running process to finish first.".into());
+    }
+    delete_model(&app, &options.model)
 }
 
 #[tauri::command]
@@ -265,6 +277,7 @@ pub fn run() {
             start_transcribe,
             list_whisper_models,
             start_model_download,
+            delete_whisper_model,
             probe_grab,
             start_grab,
             stop_conversion

@@ -16,6 +16,7 @@ import {
   Settings2,
   Square,
   Terminal,
+  Trash2,
   createIcons,
 } from "lucide";
 
@@ -420,10 +421,16 @@ app.innerHTML = `
               <div>
                 <span class="field-label">Whisper model</span>
                 <select id="transcribe-model"></select>
-                <button id="transcribe-model-download" class="secondary-button model-download-button" type="button" hidden>
-                  <i data-lucide="hard-drive-download"></i>
-                  <span>Download model</span>
-                </button>
+                <div class="model-actions">
+                  <button id="transcribe-model-download" class="secondary-button" type="button" disabled>
+                    <i data-lucide="hard-drive-download"></i>
+                    <span>Download</span>
+                  </button>
+                  <button id="transcribe-model-delete" class="secondary-button" type="button" disabled>
+                    <i data-lucide="trash-2"></i>
+                    <span>Delete</span>
+                  </button>
+                </div>
               </div>
             </div>
             <div>
@@ -577,6 +584,7 @@ createIcons({
     Settings2,
     Square,
     Terminal,
+    Trash2,
   },
 });
 
@@ -640,6 +648,7 @@ const forceTranscribe = byId<HTMLInputElement>("force-transcribe");
 const transcribeLanguage = byId<HTMLSelectElement>("transcribe-language");
 const transcribeModel = byId<HTMLSelectElement>("transcribe-model");
 const transcribeModelDownloadButton = byId<HTMLButtonElement>("transcribe-model-download");
+const transcribeModelDeleteButton = byId<HTMLButtonElement>("transcribe-model-delete");
 const converterModeNote = byId<HTMLElement>("converter-mode-note");
 type ProgressElements = {
   track: HTMLElement;
@@ -710,14 +719,22 @@ function phaseIndex(phase: string): number {
 
 function renderPhases() {
   const phases = phasesForRender();
+  const workflow = runningWorkflow ?? activeWorkflow;
   const activeIndex = phaseIndex(currentStatus.phase);
   phaseList.innerHTML = phases
-    .map(([, label], index) => {
+    .map(([id, label], index) => {
+      let display = label;
+      if (workflow === "transcribe" && id === "transcribe") {
+        const model = selectedWhisperModel();
+        if (model) {
+          display = `${label} (${shortModelName(model)})`;
+        }
+      }
       const complete = currentStatus.status === "complete" || index < activeIndex;
       const active = currentStatus.status === "running" && index === activeIndex;
       const icon = complete ? "check-circle-2" : active ? "loader-circle" : "circle";
       const state = complete ? "complete" : active ? "active" : "pending";
-      return `<li class="${state}"><i data-lucide="${icon}"></i><span>${label}</span></li>`;
+      return `<li class="${state}"><i data-lucide="${icon}"></i><span>${display}</span></li>`;
     })
     .join("");
   createIcons({ icons: { CheckCircle2, Circle, LoaderCircle } });
@@ -1218,13 +1235,17 @@ function selectedWhisperModel(): WhisperModel | undefined {
   return whisperModels.find((model) => model.id === transcribeModel.value);
 }
 
+function shortModelName(model: WhisperModel): string {
+  return model.label.split(" — ")[0];
+}
+
 function updateTranscribeModelControls(running = currentStatus.status === "running") {
   const model = selectedWhisperModel();
-  const needsDownload = model !== undefined && !model.downloaded;
-  transcribeModelDownloadButton.hidden = !needsDownload;
-  transcribeModelDownloadButton.disabled = running;
+  const installed = model?.downloaded ?? false;
+  transcribeModelDownloadButton.disabled = running || model === undefined || installed;
+  transcribeModelDeleteButton.disabled = running || model === undefined || !installed;
   transcribeModel.disabled = running;
-  transcribeStartButton.disabled = running || needsDownload;
+  transcribeStartButton.disabled = running || !installed;
 }
 
 function renderWhisperModels() {
@@ -1247,6 +1268,7 @@ function renderWhisperModels() {
     transcribeModel.value = fallback.id;
   }
   updateTranscribeModelControls();
+  renderPhases();
 }
 
 async function loadWhisperModels() {
@@ -1275,12 +1297,28 @@ transcribeStartButton.addEventListener("click", () =>
   }),
 );
 
-transcribeModel.addEventListener("change", () => updateTranscribeModelControls());
+transcribeModel.addEventListener("change", () => {
+  updateTranscribeModelControls();
+  renderPhases();
+});
 transcribeModelDownloadButton.addEventListener("click", () =>
   startRun("transcribe", "start_model_download", {
     model: transcribeModel.value,
   }),
 );
+transcribeModelDeleteButton.addEventListener("click", async () => {
+  const model = selectedWhisperModel();
+  if (!model) {
+    return;
+  }
+  try {
+    await invoke("delete_whisper_model", { options: { model: model.id } });
+    appendLog({ stream: "stdout", line: `Deleted model ${model.id}` });
+    await loadWhisperModels();
+  } catch (error) {
+    appendLog({ stream: "stderr", line: String(error) });
+  }
+});
 
 async function inspectGrabUrl() {
   setActiveWorkflow("grabber");
