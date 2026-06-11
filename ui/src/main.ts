@@ -1591,7 +1591,9 @@ function setActivePlayerCue(index: number) {
   if (button) {
     button.classList.add("active");
     if (playerFollow.checked) {
-      button.scrollIntoView({ block: "nearest" });
+      // Keep the active cue pinned to the top of the scroll window so the
+      // upcoming dialogue is always visible below it.
+      playerCueList.scrollTo({ top: button.offsetTop, behavior: "smooth" });
     }
   }
 }
@@ -1617,7 +1619,7 @@ function renderPlayerCues() {
 
     const time = document.createElement("span");
     time.className = "cue-time";
-    time.textContent = formatCueTime(cue.start);
+    time.textContent = `${formatCueTime(cue.start)} → ${formatCueTime(cue.end)}`;
     const text = document.createElement("span");
     text.className = "cue-text";
     text.textContent = cue.text;

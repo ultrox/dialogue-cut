@@ -597,6 +597,7 @@ input:focus {
 }
 
 .cue-list {
+  position: relative;
   max-height: 340px;
   overflow-y: auto;
   display: grid;
@@ -605,7 +606,7 @@ input:focus {
 
 .cue-row {
   display: grid;
-  grid-template-columns: 72px minmax(0, 1fr);
+  grid-template-columns: 122px minmax(0, 1fr);
   gap: 10px;
   align-items: baseline;
   padding: 8px 10px;
