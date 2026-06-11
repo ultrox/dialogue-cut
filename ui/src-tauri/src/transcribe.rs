@@ -32,8 +32,18 @@ const WHISPER_MODELS: &[(&str, &str, u64)] = &[
     ("mlx-community/whisper-medium", "Medium — high accuracy", 1500),
     (
         "mlx-community/whisper-large-v3-turbo",
-        "Large v3 Turbo — best quality",
+        "Large v3 Turbo — fast, high quality",
         1700,
+    ),
+    (
+        "mlx-community/whisper-large-v3-turbo-german-f16",
+        "Large v3 Turbo German — best for German",
+        1600,
+    ),
+    (
+        "mlx-community/whisper-large-v3-mlx",
+        "Large v3 — most accurate, slow",
+        3000,
     ),
 ];
 
