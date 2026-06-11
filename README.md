@@ -56,11 +56,10 @@ movie.dialogue-project.json
 
 The app then opens `Subtitle project`, where each segment can be kept, dropped,
 or trimmed from either side. The timeline is scaled against original movie time,
-so gaps between dialogue blocks remain visible while editing. If the browser
-preview MP4 is missing, the app builds it automatically after loading the
-project. `Play kept` previews the edit by skipping disabled segments and gaps
-without cutting files. Nothing is cut until `Commit render`, which saves the
-project and renders:
+so gaps between dialogue blocks remain visible while editing. Build the optional
+preview MP4 when you want in-app playback; `Play kept` previews the edit by
+skipping disabled segments and gaps without cutting files. Nothing is cut until
+`Commit render`, which saves the project and renders:
 
 ```txt
 movie.dialogue-only.reviewed.mp4
