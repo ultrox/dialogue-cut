@@ -543,39 +543,15 @@ input:focus {
   gap: 8px;
 }
 
-/* The player comes first; file pickers live in a narrow right-hand column. */
-#player-panel.active {
+.player-source-panel {
+  padding: 22px;
+  border-bottom: 1px solid #ced7d1;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 264px;
-  align-items: stretch;
+  gap: 8px;
 }
 
-.player-main {
-  grid-column: 1;
-}
-
-.player-cues-block {
-  grid-column: 1;
-}
-
-.player-source {
-  grid-column: 2;
-  grid-row: 1 / span 2;
-  border-left: 1px solid #d6ded9;
-  padding-right: 20px;
-  padding-left: 20px;
-}
-
-@media (max-width: 1180px) {
-  #player-panel.active {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .player-source {
-    grid-column: 1;
-    grid-row: auto;
-    border-left: none;
-  }
+.player-source-panel .eyebrow {
+  margin-bottom: 4px;
 }
 
 .subtitle-row {

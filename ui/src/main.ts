@@ -552,28 +552,6 @@ app.innerHTML = `
           </div>
         </section>
 
-        <section class="section-block player-source">
-          <div class="section-heading">
-            <div>
-              <span class="eyebrow">Source</span>
-              <h2>Files</h2>
-            </div>
-            <i data-lucide="file-text"></i>
-          </div>
-          <div class="file-row">
-            <input id="player-video-path" type="text" placeholder="/path/to/movie.mp4" spellcheck="false" />
-            <button id="player-video-browse" class="icon-button" type="button" title="Choose video">
-              <i data-lucide="folder-open"></i>
-            </button>
-          </div>
-          <div class="file-row subtitle-row">
-            <select id="player-subtitle"></select>
-            <button id="player-subtitle-browse" class="icon-button" type="button" title="Choose subtitle file">
-              <i data-lucide="folder-open"></i>
-            </button>
-          </div>
-          <p id="player-note" class="field-note"></p>
-        </section>
       </div>
 
       <div id="grabber-panel" class="tab-panel">
@@ -639,7 +617,23 @@ app.innerHTML = `
     </section>
 
     <aside class="side-panel">
-      <section class="progress-panel">
+      <section id="player-source-panel" class="player-source-panel" hidden>
+        <span class="eyebrow">Source</span>
+        <div class="file-row">
+          <input id="player-video-path" type="text" placeholder="/path/to/movie.mp4" spellcheck="false" />
+          <button id="player-video-browse" class="icon-button" type="button" title="Choose video">
+            <i data-lucide="folder-open"></i>
+          </button>
+        </div>
+        <div class="file-row subtitle-row">
+          <select id="player-subtitle"></select>
+          <button id="player-subtitle-browse" class="icon-button" type="button" title="Choose subtitle file">
+            <i data-lucide="folder-open"></i>
+          </button>
+        </div>
+        <p id="player-note" class="field-note"></p>
+      </section>
+      <section id="pipeline-panel" class="progress-panel">
         <span class="eyebrow">Pipeline</span>
         <ol id="phase-list" class="phase-list"></ol>
       </section>
@@ -744,6 +738,8 @@ const transcribeModel = byId<HTMLSelectElement>("transcribe-model");
 const transcribeModelDownloadButton = byId<HTMLButtonElement>("transcribe-model-download");
 const transcribeModelDeleteButton = byId<HTMLButtonElement>("transcribe-model-delete");
 const converterModeNote = byId<HTMLElement>("converter-mode-note");
+const playerSourcePanel = byId<HTMLElement>("player-source-panel");
+const pipelinePanel = byId<HTMLElement>("pipeline-panel");
 const playerVideoPath = byId<HTMLInputElement>("player-video-path");
 const playerVideoBrowse = byId<HTMLButtonElement>("player-video-browse");
 const playerSubtitle = byId<HTMLSelectElement>("player-subtitle");
@@ -859,6 +855,9 @@ function setActiveWorkflow(workflow: Workflow) {
   for (const [name, panel] of Object.entries(workflowPanels)) {
     panel.classList.toggle("active", name === workflow);
   }
+  // The player has no pipeline; its file pickers take that sidebar spot.
+  playerSourcePanel.hidden = workflow !== "player";
+  pipelinePanel.hidden = workflow === "player";
   renderPhases();
 }
 
