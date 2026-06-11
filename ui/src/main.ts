@@ -1,4 +1,4 @@
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
@@ -88,8 +88,6 @@ type SubtitleProjectData = {
   projectPath: string;
   videoPath: string;
   outputPath: string;
-  previewPath: string;
-  previewReady: boolean;
   project: SubtitleProject;
 };
 
@@ -135,10 +133,6 @@ let materialGalleryLoadId = 0;
 let subtitleProject: SubtitleProject | null = null;
 let subtitleDirty = false;
 let pendingPreparedProjectPath = "";
-let subtitlePreviewPath = "";
-let subtitlePreviewReady = false;
-let selectedSubtitleSegmentIndex = 0;
-let timelineDuration = 0;
 
 app.innerHTML = `
   <header class="app-header">
@@ -303,56 +297,6 @@ app.innerHTML = `
               <span>Review marks</span>
               <strong id="subtitle-review-count">0</strong>
             </div>
-          </div>
-        </section>
-
-        <section class="section-block subtitle-preview-block">
-          <div class="section-heading">
-            <div>
-              <span class="eyebrow">Preview</span>
-              <h2 id="subtitle-preview-title">Timeline</h2>
-            </div>
-            <button id="subtitle-preview-button" class="secondary-button" type="button" disabled>
-              <i data-lucide="film"></i>
-              <span>Build preview MP4</span>
-            </button>
-          </div>
-          <video id="subtitle-preview-video" class="subtitle-preview-video" controls preload="metadata"></video>
-          <div class="timeline-toolbar">
-            <label class="checkbox-label">
-              <input id="subtitle-skip-toggle" type="checkbox" checked />
-              <span>Skip gaps</span>
-            </label>
-            <button id="subtitle-play-kept-button" class="secondary-button" type="button" disabled>
-              <i data-lucide="play"></i>
-              <span>Play kept</span>
-            </button>
-            <span id="subtitle-current-time" class="timeline-time">0:00</span>
-          </div>
-          <div id="subtitle-timeline-shell" class="subtitle-timeline-shell">
-            <div id="subtitle-timeline" class="subtitle-timeline">
-              <div id="subtitle-timeline-ruler" class="subtitle-timeline-ruler"></div>
-              <div id="subtitle-timeline-track" class="subtitle-timeline-track"></div>
-              <div id="subtitle-timeline-playhead" class="subtitle-timeline-playhead"></div>
-            </div>
-          </div>
-          <div class="selected-segment-panel">
-            <label class="checkbox-label">
-              <input id="selected-segment-enabled" type="checkbox" disabled />
-              <span>Keep selected</span>
-            </label>
-            <label class="segment-time">
-              <span>Start</span>
-              <input id="selected-segment-start" type="number" min="0" step="0.01" disabled />
-            </label>
-            <label class="segment-time">
-              <span>End</span>
-              <input id="selected-segment-end" type="number" min="0" step="0.01" disabled />
-            </label>
-            <button id="selected-segment-drop-button" class="secondary-button" type="button" disabled>
-              <span>Drop segment</span>
-            </button>
-            <p id="selected-segment-meta" class="selected-segment-meta">No segment selected.</p>
           </div>
         </section>
 
@@ -624,24 +568,6 @@ const subtitleKeptRuntime = document.querySelector<HTMLElement>("#subtitle-kept-
 const subtitleKeptCount = document.querySelector<HTMLElement>("#subtitle-kept-count")!;
 const subtitleDroppedCount = document.querySelector<HTMLElement>("#subtitle-dropped-count")!;
 const subtitleReviewCount = document.querySelector<HTMLElement>("#subtitle-review-count")!;
-const subtitlePreviewTitle = document.querySelector<HTMLElement>("#subtitle-preview-title")!;
-const subtitlePreviewButton = document.querySelector<HTMLButtonElement>("#subtitle-preview-button")!;
-const subtitlePreviewVideo = document.querySelector<HTMLVideoElement>("#subtitle-preview-video")!;
-const subtitleSkipToggle = document.querySelector<HTMLInputElement>("#subtitle-skip-toggle")!;
-const subtitlePlayKeptButton = document.querySelector<HTMLButtonElement>("#subtitle-play-kept-button")!;
-const subtitleCurrentTime = document.querySelector<HTMLElement>("#subtitle-current-time")!;
-const subtitleTimelineShell = document.querySelector<HTMLElement>("#subtitle-timeline-shell")!;
-const subtitleTimeline = document.querySelector<HTMLElement>("#subtitle-timeline")!;
-const subtitleTimelineRuler = document.querySelector<HTMLElement>("#subtitle-timeline-ruler")!;
-const subtitleTimelineTrack = document.querySelector<HTMLElement>("#subtitle-timeline-track")!;
-const subtitleTimelinePlayhead = document.querySelector<HTMLElement>("#subtitle-timeline-playhead")!;
-const selectedSegmentEnabled = document.querySelector<HTMLInputElement>("#selected-segment-enabled")!;
-const selectedSegmentStart = document.querySelector<HTMLInputElement>("#selected-segment-start")!;
-const selectedSegmentEnd = document.querySelector<HTMLInputElement>("#selected-segment-end")!;
-const selectedSegmentDropButton = document.querySelector<HTMLButtonElement>(
-  "#selected-segment-drop-button",
-)!;
-const selectedSegmentMeta = document.querySelector<HTMLElement>("#selected-segment-meta")!;
 const subtitleSegmentList = document.querySelector<HTMLElement>("#subtitle-segment-list")!;
 const processingOutputPath = document.querySelector<HTMLElement>("#processing-output-path")!;
 const grabberOutputPath = document.querySelector<HTMLElement>("#grabber-output-path")!;
@@ -705,8 +631,6 @@ function refreshSubtitleControls(running = currentStatus.status === "running") {
   subtitleProjectBrowseButton.disabled = running;
   subtitleSaveButton.disabled = running || !hasProject || !subtitleDirty;
   subtitleRenderButton.disabled = running || !hasProject;
-  subtitlePreviewButton.disabled = running || !hasProject;
-  subtitlePlayKeptButton.disabled = running || !hasProject || !subtitlePreviewReady;
   subtitleStopButton.disabled = !running;
   subtitleDirtyChip.className = `runtime-chip ${subtitleDirty ? "pending" : "ready"}`;
   subtitleDirtyChip.textContent = subtitleDirty ? "Unsaved" : "Saved";
@@ -780,11 +704,6 @@ function setStatus(status: ConversionStatus) {
   renderPhases();
   if (workflow === "grabber" && status.status === "complete" && status.message === "Material is ready") {
     void loadMaterialGallery();
-  }
-  if (workflow === "subtitles" && status.status === "complete" && status.message === "Preview MP4 is ready") {
-    subtitlePreviewPath = status.outputPath ?? subtitlePreviewPath;
-    subtitlePreviewReady = true;
-    setSubtitlePreviewSource();
   }
   if (!running) {
     runningWorkflow = null;
@@ -872,249 +791,6 @@ function updateSegmentDuration(segment: SubtitleSegment) {
   segment.duration = Number(segmentDuration(segment).toFixed(3));
 }
 
-function projectMaxEnd(): number {
-  if (!subtitleProject) {
-    return 0;
-  }
-  return subtitleProject.segments.reduce((maxEnd, segment) => Math.max(maxEnd, segment.end), 0);
-}
-
-function updateTimelineDuration() {
-  const videoDuration = Number.isFinite(subtitlePreviewVideo.duration)
-    ? subtitlePreviewVideo.duration
-    : 0;
-  timelineDuration = Math.max(projectMaxEnd(), videoDuration, 1);
-}
-
-function enabledSubtitleSegments(): Array<{ segment: SubtitleSegment; index: number }> {
-  if (!subtitleProject) {
-    return [];
-  }
-  return subtitleProject.segments
-    .map((segment, index) => ({ segment, index }))
-    .filter(({ segment }) => segmentEnabled(segment))
-    .sort((first, second) => first.segment.start - second.segment.start);
-}
-
-function selectedSegment(): SubtitleSegment | null {
-  if (!subtitleProject) {
-    return null;
-  }
-  return subtitleProject.segments[selectedSubtitleSegmentIndex] ?? null;
-}
-
-function setSubtitlePreviewSource() {
-  subtitlePreviewReady = subtitlePreviewReady && Boolean(subtitlePreviewPath);
-  subtitlePreviewTitle.textContent = subtitlePreviewReady ? "Timeline preview ready" : "Timeline";
-  if (subtitlePreviewReady) {
-    subtitlePreviewVideo.src = convertFileSrc(subtitlePreviewPath);
-    subtitlePreviewVideo.load();
-  } else {
-    subtitlePreviewVideo.removeAttribute("src");
-    subtitlePreviewVideo.load();
-  }
-  refreshSubtitleControls();
-}
-
-function timeFromTimelinePointer(event: PointerEvent | MouseEvent): number {
-  const rect = subtitleTimeline.getBoundingClientRect();
-  const x = Math.min(Math.max(0, event.clientX - rect.left), rect.width);
-  return (x / Math.max(1, rect.width)) * timelineDuration;
-}
-
-function updateTimelinePlayhead() {
-  updateTimelineDuration();
-  const current = Math.min(Math.max(0, subtitlePreviewVideo.currentTime || 0), timelineDuration);
-  subtitleTimelinePlayhead.style.left = `${(current / timelineDuration) * 100}%`;
-  subtitleCurrentTime.textContent = formatDuration(current) ?? "0:00";
-}
-
-function renderTimelineRuler() {
-  subtitleTimelineRuler.replaceChildren();
-  const step = timelineDuration > 5400 ? 900 : timelineDuration > 1800 ? 300 : 60;
-  for (let time = 0; time <= timelineDuration; time += step) {
-    const tick = document.createElement("span");
-    tick.className = "timeline-tick";
-    tick.style.left = `${(time / timelineDuration) * 100}%`;
-    tick.textContent = formatDuration(time) ?? "0:00";
-    subtitleTimelineRuler.append(tick);
-  }
-}
-
-function selectSubtitleSegment(index: number, seek = false) {
-  if (!subtitleProject || !subtitleProject.segments[index]) {
-    return;
-  }
-  selectedSubtitleSegmentIndex = index;
-  const segment = subtitleProject.segments[index];
-  if (seek && subtitlePreviewReady) {
-    subtitlePreviewVideo.currentTime = Math.max(0, segment.start);
-  }
-  updateSelectedSegmentControls();
-  renderSubtitleTimeline();
-  renderSubtitleSegments();
-}
-
-function renderSubtitleTimeline() {
-  updateTimelineDuration();
-  subtitleTimelineTrack.replaceChildren();
-  const width = Math.max(1200, Math.min(5200, Math.round(timelineDuration * 0.24)));
-  subtitleTimeline.style.width = `${width}px`;
-  renderTimelineRuler();
-
-  if (!subtitleProject) {
-    updateTimelinePlayhead();
-    return;
-  }
-
-  subtitleProject.segments.forEach((segment, index) => {
-    const block = document.createElement("button");
-    block.className = "timeline-segment";
-    block.type = "button";
-    block.classList.toggle("disabled", !segmentEnabled(segment));
-    block.classList.toggle("review", segment.review === true);
-    block.classList.toggle("selected", index === selectedSubtitleSegmentIndex);
-    block.style.left = `${(segment.start / timelineDuration) * 100}%`;
-    block.style.width = `${(segmentDuration(segment) / timelineDuration) * 100}%`;
-    block.title = `${segment.id ?? `segment-${index + 1}`} ${formatDuration(segment.start)} -> ${formatDuration(
-      segment.end,
-    )}`;
-    block.addEventListener("click", (event) => {
-      event.stopPropagation();
-      selectSubtitleSegment(index, true);
-    });
-
-    const leftHandle = document.createElement("span");
-    leftHandle.className = "timeline-handle left";
-    leftHandle.addEventListener("pointerdown", (event) => startTimelineDrag(event, index, "start"));
-    const rightHandle = document.createElement("span");
-    rightHandle.className = "timeline-handle right";
-    rightHandle.addEventListener("pointerdown", (event) => startTimelineDrag(event, index, "end"));
-    block.append(leftHandle, rightHandle);
-    subtitleTimelineTrack.append(block);
-  });
-  const selectedBlock = subtitleTimelineTrack.querySelector<HTMLElement>(".timeline-segment.selected");
-  if (selectedBlock) {
-    const targetScroll =
-      selectedBlock.offsetLeft - subtitleTimelineShell.clientWidth / 2 + selectedBlock.offsetWidth / 2;
-    subtitleTimelineShell.scrollLeft = Math.max(0, targetScroll);
-  }
-  updateTimelinePlayhead();
-}
-
-function findSegmentIndexAtTime(time: number): number {
-  if (!subtitleProject) {
-    return -1;
-  }
-  return subtitleProject.segments.findIndex((segment) => time >= segment.start && time <= segment.end);
-}
-
-function startTimelineDrag(event: PointerEvent, index: number, edge: "start" | "end") {
-  event.preventDefault();
-  event.stopPropagation();
-  selectSubtitleSegment(index);
-  const segment = selectedSegment();
-  if (!segment) {
-    return;
-  }
-  const onMove = (moveEvent: PointerEvent) => {
-    const time = timeFromTimelinePointer(moveEvent);
-    if (edge === "start") {
-      segment.start = Number(Math.min(Math.max(0, time), segment.end - 0.05).toFixed(3));
-    } else {
-      segment.end = Number(Math.max(segment.start + 0.05, time).toFixed(3));
-    }
-    updateSegmentDuration(segment);
-    subtitleDirty = true;
-    renderSubtitleStats();
-    updateSelectedSegmentControls();
-    renderSubtitleTimeline();
-  };
-  const onUp = () => {
-    window.removeEventListener("pointermove", onMove);
-    window.removeEventListener("pointerup", onUp);
-  };
-  window.addEventListener("pointermove", onMove);
-  window.addEventListener("pointerup", onUp, { once: true });
-}
-
-function updateSelectedSegmentControls() {
-  const segment = selectedSegment();
-  const hasSegment = Boolean(segment);
-  selectedSegmentEnabled.disabled = !hasSegment;
-  selectedSegmentStart.disabled = !hasSegment;
-  selectedSegmentEnd.disabled = !hasSegment;
-  selectedSegmentDropButton.disabled = !hasSegment;
-  if (!segment) {
-    selectedSegmentEnabled.checked = false;
-    selectedSegmentStart.value = "";
-    selectedSegmentEnd.value = "";
-    selectedSegmentMeta.textContent = "No segment selected.";
-    return;
-  }
-
-  selectedSegmentEnabled.checked = segmentEnabled(segment);
-  selectedSegmentStart.value = formatSeconds(segment.start);
-  selectedSegmentEnd.value = formatSeconds(segment.end);
-  const id = segment.id ?? `segment-${selectedSubtitleSegmentIndex + 1}`;
-  const source = segment.source ? ` | ${segment.source}` : "";
-  const reasons = subtitleReviewReasons(segment);
-  selectedSegmentMeta.textContent = `${id} | ${formatDuration(segmentDuration(segment)) ?? "0:00"}${source}${
-    reasons ? ` | ${reasons}` : ""
-  }`;
-}
-
-function applySelectedSegmentControls() {
-  const segment = selectedSegment();
-  if (!segment) {
-    return;
-  }
-  const start = Math.max(0, Number(selectedSegmentStart.value) || 0);
-  const end = Math.max(start + 0.05, Number(selectedSegmentEnd.value) || start + 0.05);
-  segment.enabled = selectedSegmentEnabled.checked;
-  segment.start = Number(start.toFixed(3));
-  segment.end = Number(end.toFixed(3));
-  updateSegmentDuration(segment);
-  markSubtitleDirty();
-  updateSelectedSegmentControls();
-  renderSubtitleTimeline();
-  renderSubtitleSegments();
-}
-
-function jumpToNextEnabledSegment(fromTime: number): boolean {
-  const next = enabledSubtitleSegments().find(({ segment }) => segment.end > fromTime + 0.05);
-  if (!next) {
-    subtitlePreviewVideo.pause();
-    return false;
-  }
-  subtitlePreviewVideo.currentTime = Math.max(next.segment.start, fromTime);
-  selectSubtitleSegment(next.index);
-  return true;
-}
-
-function enforceSkipPlayback() {
-  if (!subtitleProject || !subtitlePreviewReady || !subtitleSkipToggle.checked || subtitlePreviewVideo.paused) {
-    return;
-  }
-  const current = subtitlePreviewVideo.currentTime;
-  const active = enabledSubtitleSegments().find(
-    ({ segment }) => current >= segment.start && current < segment.end - 0.04,
-  );
-  if (active) {
-    if (active.index !== selectedSubtitleSegmentIndex) {
-      selectSubtitleSegment(active.index);
-    }
-    return;
-  }
-  const next = enabledSubtitleSegments().find(({ segment }) => segment.start > current);
-  if (next) {
-    subtitlePreviewVideo.currentTime = next.segment.start;
-    selectSubtitleSegment(next.index);
-  } else {
-    subtitlePreviewVideo.pause();
-  }
-}
-
 function renderSubtitleSegments() {
   subtitleSegmentList.replaceChildren();
   if (!subtitleProject) {
@@ -1130,21 +806,16 @@ function renderSubtitleSegments() {
     row.className = "subtitle-segment";
     row.classList.toggle("disabled", !segmentEnabled(segment));
     row.classList.toggle("review", segment.review === true);
-    row.classList.toggle("selected", index === selectedSubtitleSegmentIndex);
-    row.addEventListener("click", () => selectSubtitleSegment(index, true));
 
     const keepLabel = document.createElement("label");
     keepLabel.className = "checkbox-label segment-keep";
     const keepInput = document.createElement("input");
     keepInput.type = "checkbox";
     keepInput.checked = segmentEnabled(segment);
-    keepInput.addEventListener("change", (event) => {
-      event.stopPropagation();
+    keepInput.addEventListener("change", () => {
       segment.enabled = keepInput.checked;
       row.classList.toggle("disabled", !keepInput.checked);
       markSubtitleDirty();
-      updateSelectedSegmentControls();
-      renderSubtitleTimeline();
     });
     const keepText = document.createElement("span");
     keepText.textContent = "Keep";
@@ -1196,11 +867,7 @@ function renderSubtitleSegments() {
         reasons ? ` | ${reasons}` : ""
       }`;
       markSubtitleDirty();
-      updateSelectedSegmentControls();
-      renderSubtitleTimeline();
     };
-    startInput.addEventListener("click", (event) => event.stopPropagation());
-    endInput.addEventListener("click", (event) => event.stopPropagation());
     startInput.addEventListener("change", updateTiming);
     endInput.addEventListener("change", updateTiming);
 
@@ -1209,7 +876,6 @@ function renderSubtitleSegments() {
     text.rows = 2;
     text.value = segment.text ?? "";
     text.placeholder = "Subtitle text";
-    text.addEventListener("click", (event) => event.stopPropagation());
     text.addEventListener("input", () => {
       segment.text = text.value;
       markSubtitleDirty();
@@ -1231,16 +897,10 @@ async function loadSubtitleProject(path = subtitleProjectPath.value.trim()) {
     });
     subtitleProject = data.project;
     subtitleDirty = false;
-    selectedSubtitleSegmentIndex = 0;
-    subtitlePreviewPath = data.previewPath;
-    subtitlePreviewReady = data.previewReady;
     subtitleProjectPath.value = data.projectPath;
     subtitleOutputPath.textContent = data.outputPath;
     subtitleRunMessage.textContent = "Project loaded";
-    setSubtitlePreviewSource();
     renderSubtitleStats();
-    updateSelectedSegmentControls();
-    renderSubtitleTimeline();
     renderSubtitleSegments();
     setStatus({
       status: "idle",
@@ -1290,32 +950,6 @@ async function commitSubtitleProject() {
       },
     });
     subtitleOutputPath.textContent = outputPath;
-  } catch (error) {
-    setStatus({
-      status: "error",
-      phase: "error",
-      message: String(error),
-    });
-  }
-}
-
-async function buildSubtitlePreviewProxy() {
-  if (!subtitleProject) {
-    return;
-  }
-  setActiveWorkflow("subtitles");
-  runningWorkflow = "subtitles";
-  logOutput.textContent = "";
-  try {
-    const previewPath = await invoke<string>("start_preview_proxy", {
-      options: {
-        projectPath: subtitleProjectPath.value.trim(),
-      },
-    });
-    subtitlePreviewPath = previewPath;
-    subtitlePreviewReady = false;
-    subtitlePreviewTitle.textContent = "Building preview MP4";
-    refreshSubtitleControls();
   } catch (error) {
     setStatus({
       status: "error",
@@ -1629,47 +1263,6 @@ subtitleSaveButton.addEventListener("click", async () => {
   }
 });
 subtitleRenderButton.addEventListener("click", () => void commitSubtitleProject());
-subtitlePreviewButton.addEventListener("click", () => void buildSubtitlePreviewProxy());
-subtitlePlayKeptButton.addEventListener("click", async () => {
-  if (!subtitlePreviewReady) {
-    return;
-  }
-  const selected = selectedSegment();
-  if (selected && segmentEnabled(selected)) {
-    subtitlePreviewVideo.currentTime = selected.start;
-  } else {
-    jumpToNextEnabledSegment(0);
-  }
-  await subtitlePreviewVideo.play();
-});
-selectedSegmentEnabled.addEventListener("change", applySelectedSegmentControls);
-selectedSegmentStart.addEventListener("change", applySelectedSegmentControls);
-selectedSegmentEnd.addEventListener("change", applySelectedSegmentControls);
-selectedSegmentDropButton.addEventListener("click", () => {
-  selectedSegmentEnabled.checked = false;
-  applySelectedSegmentControls();
-});
-subtitleTimelineTrack.addEventListener("click", (event) => {
-  if (!subtitleProject) {
-    return;
-  }
-  const time = timeFromTimelinePointer(event);
-  const index = findSegmentIndexAtTime(time);
-  if (index >= 0) {
-    selectSubtitleSegment(index, false);
-  }
-  if (subtitlePreviewReady) {
-    subtitlePreviewVideo.currentTime = time;
-  }
-});
-subtitlePreviewVideo.addEventListener("loadedmetadata", () => {
-  updateTimelineDuration();
-  renderSubtitleTimeline();
-});
-subtitlePreviewVideo.addEventListener("timeupdate", () => {
-  enforceSkipPlayback();
-  updateTimelinePlayhead();
-});
 processingBrowseButton.addEventListener("click", () =>
   chooseVideo(processingVideoPath, "processing", grabOutputDir.value.trim()),
 );
@@ -1858,8 +1451,6 @@ listen<RuntimeStatus>("runtime-state", ({ payload }) => setRuntimeStatus(payload
 setActiveWorkflow(activeWorkflow);
 setStatus(currentStatus);
 renderSubtitleStats();
-updateSelectedSegmentControls();
-renderSubtitleTimeline();
 updateSpeed(slowSpeed.value);
 invoke<string>("get_default_grab_output_dir")
   .then((path) => {
