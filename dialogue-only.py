@@ -237,11 +237,6 @@ def process_video(args, video):
             args.dry_run,
         )
 
-    if args.project_only:
-        print(f"Subtitle project: {project_path}")
-        print(f"Review report: {review_report}")
-        return
-
     print("Creating dialogue-only video...")
     if args.no_project:
         run(
@@ -304,16 +299,8 @@ def main():
     parser.add_argument("--force-subtitle-extract", action="store_true")
     parser.add_argument("--mode", choices=["copy", "encode"], default="encode")
     parser.add_argument("--no-project", action="store_true")
-    parser.add_argument(
-        "--project-only",
-        action="store_true",
-        help="Create the editable dialogue project and stop before rendering video.",
-    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
-
-    if args.project_only and args.no_project:
-        sys.exit("--project-only cannot be used with --no-project.")
 
     if len(args.video) > 1 and (
         args.output

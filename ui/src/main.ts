@@ -17,7 +17,7 @@ import {
   createIcons,
 } from "lucide";
 
-type Workflow = "dialogue" | "subtitles" | "processing" | "grabber";
+type Workflow = "dialogue" | "processing" | "grabber";
 
 type ConversionStatus = {
   status: "idle" | "running" | "complete" | "error";
@@ -66,31 +66,6 @@ type MaterialVideo = {
   thumbnailDataUrl?: string;
 };
 
-type SubtitleSegment = {
-  id?: string;
-  start: number;
-  end: number;
-  enabled?: boolean;
-  text?: string;
-  source?: string;
-  review?: boolean;
-  reviewReasons?: string[];
-  duration?: number;
-};
-
-type SubtitleProject = {
-  video?: string;
-  segments: SubtitleSegment[];
-  [key: string]: unknown;
-};
-
-type SubtitleProjectData = {
-  projectPath: string;
-  videoPath: string;
-  outputPath: string;
-  project: SubtitleProject;
-};
-
 const workflowPhases: Record<Workflow, readonly (readonly [string, string])[]> = {
   dialogue: [
     ["setup", "Prepare runtime"],
@@ -99,12 +74,6 @@ const workflowPhases: Record<Workflow, readonly (readonly [string, string])[]> =
     ["transcribe", "Transcribe German"],
     ["filter", "Filter dialogue"],
     ["render", "Render segments"],
-    ["stitch", "Stitch MP4"],
-  ],
-  subtitles: [
-    ["inspect", "Load project"],
-    ["filter", "Edit subtitles"],
-    ["render", "Render saved cut"],
     ["stitch", "Stitch MP4"],
   ],
   processing: [
@@ -130,9 +99,6 @@ let currentStatus: ConversionStatus = {
 };
 let grabMetadata: GrabMetadata | null = null;
 let materialGalleryLoadId = 0;
-let subtitleProject: SubtitleProject | null = null;
-let subtitleDirty = false;
-let pendingPreparedProjectPath = "";
 
 app.innerHTML = `
   <header class="app-header">
@@ -152,10 +118,6 @@ app.innerHTML = `
         <button id="dialogue-tab" class="tab-button active" type="button">
           <i data-lucide="film"></i>
           <span>Dialogue cut</span>
-        </button>
-        <button id="subtitles-tab" class="tab-button" type="button">
-          <i data-lucide="file-text"></i>
-          <span>Subtitle project</span>
         </button>
         <button id="processing-tab" class="tab-button" type="button">
           <i data-lucide="settings-2"></i>
@@ -234,13 +196,9 @@ app.innerHTML = `
             </div>
           </div>
           <div class="action-row">
-            <button id="dialogue-prepare-button" class="primary-button" type="button">
-              <i data-lucide="file-text"></i>
-              <span>Prepare project</span>
-            </button>
-            <button id="dialogue-start-button" class="secondary-button" type="button">
+            <button id="dialogue-start-button" class="primary-button" type="button">
               <i data-lucide="play"></i>
-              <span>Render immediately</span>
+              <span>Start conversion</span>
             </button>
             <button id="dialogue-stop-button" class="secondary-button" type="button" disabled>
               <i data-lucide="square"></i>
@@ -248,92 +206,6 @@ app.innerHTML = `
             </button>
           </div>
           <p id="dialogue-output-path" class="output-path"></p>
-        </section>
-      </div>
-
-      <div id="subtitles-panel" class="tab-panel">
-        <section class="section-block source-block">
-          <div class="section-heading">
-            <div>
-              <span class="eyebrow">Project</span>
-              <h2>Load editable subtitles</h2>
-            </div>
-            <i data-lucide="file-text"></i>
-          </div>
-          <div class="input-action-row project-row">
-            <input id="subtitle-project-path" type="text" placeholder="/path/to/movie.dialogue-project.json" spellcheck="false" />
-            <button id="subtitle-project-browse-button" class="icon-button" type="button" title="Choose project">
-              <i data-lucide="folder-open"></i>
-            </button>
-            <button id="subtitle-load-button" class="secondary-button" type="button">
-              <span>Load</span>
-            </button>
-          </div>
-          <p id="subtitle-video-path" class="output-path"></p>
-        </section>
-
-        <section class="section-block subtitle-summary-block">
-          <div class="section-heading">
-            <div>
-              <span class="eyebrow">Plan</span>
-              <h2 id="subtitle-project-title">No project loaded</h2>
-            </div>
-            <span id="subtitle-dirty-chip" class="runtime-chip ready">Saved</span>
-          </div>
-          <div class="subtitle-stats">
-            <div>
-              <span>Kept runtime</span>
-              <strong id="subtitle-kept-runtime">0:00</strong>
-            </div>
-            <div>
-              <span>Kept segments</span>
-              <strong id="subtitle-kept-count">0</strong>
-            </div>
-            <div>
-              <span>Dropped segments</span>
-              <strong id="subtitle-dropped-count">0</strong>
-            </div>
-            <div>
-              <span>Review marks</span>
-              <strong id="subtitle-review-count">0</strong>
-            </div>
-          </div>
-        </section>
-
-        <section class="section-block run-block">
-          <div class="section-heading compact">
-            <div>
-              <span class="eyebrow">Commit</span>
-              <h2 id="subtitle-run-message">Load a project to edit</h2>
-            </div>
-          </div>
-          <div class="action-row">
-            <button id="subtitle-save-button" class="secondary-button" type="button" disabled>
-              <i data-lucide="file-text"></i>
-              <span>Save project</span>
-            </button>
-            <button id="subtitle-render-button" class="primary-button" type="button" disabled>
-              <i data-lucide="play"></i>
-              <span>Commit render</span>
-            </button>
-            <button id="subtitle-stop-button" class="secondary-button" type="button" disabled>
-              <i data-lucide="square"></i>
-              <span>Cancel</span>
-            </button>
-          </div>
-          <p id="subtitle-output-path" class="output-path"></p>
-        </section>
-
-        <section class="section-block subtitle-editor-block">
-          <div class="section-heading">
-            <div>
-              <span class="eyebrow">Segments</span>
-              <h2>Keep, drop, or trim</h2>
-            </div>
-          </div>
-          <div id="subtitle-segment-list" class="subtitle-segment-list">
-            <p class="empty-note">Load a subtitle project first.</p>
-          </div>
         </section>
       </div>
 
@@ -515,37 +387,26 @@ createIcons({
 });
 
 const dialogueTab = document.querySelector<HTMLButtonElement>("#dialogue-tab")!;
-const subtitlesTab = document.querySelector<HTMLButtonElement>("#subtitles-tab")!;
 const processingTab = document.querySelector<HTMLButtonElement>("#processing-tab")!;
 const grabberTab = document.querySelector<HTMLButtonElement>("#grabber-tab")!;
 const dialoguePanel = document.querySelector<HTMLElement>("#dialogue-panel")!;
-const subtitlesPanel = document.querySelector<HTMLElement>("#subtitles-panel")!;
 const processingPanel = document.querySelector<HTMLElement>("#processing-panel")!;
 const grabberPanel = document.querySelector<HTMLElement>("#grabber-panel")!;
 const dialogueVideoPath = document.querySelector<HTMLInputElement>("#dialogue-video-path")!;
-const subtitleProjectPath = document.querySelector<HTMLInputElement>("#subtitle-project-path")!;
 const processingVideoPath = document.querySelector<HTMLInputElement>("#processing-video-path")!;
 const grabUrl = document.querySelector<HTMLInputElement>("#grab-url")!;
 const grabOutputDir = document.querySelector<HTMLInputElement>("#grab-output-dir")!;
 const dialogueBrowseButton = document.querySelector<HTMLButtonElement>("#dialogue-browse-button")!;
-const subtitleProjectBrowseButton = document.querySelector<HTMLButtonElement>(
-  "#subtitle-project-browse-button",
-)!;
 const processingBrowseButton = document.querySelector<HTMLButtonElement>("#processing-browse-button")!;
 const grabOutputBrowseButton = document.querySelector<HTMLButtonElement>(
   "#grab-output-browse-button",
 )!;
-const dialoguePrepareButton = document.querySelector<HTMLButtonElement>("#dialogue-prepare-button")!;
 const dialogueStartButton = document.querySelector<HTMLButtonElement>("#dialogue-start-button")!;
-const subtitleLoadButton = document.querySelector<HTMLButtonElement>("#subtitle-load-button")!;
-const subtitleSaveButton = document.querySelector<HTMLButtonElement>("#subtitle-save-button")!;
-const subtitleRenderButton = document.querySelector<HTMLButtonElement>("#subtitle-render-button")!;
 const processingStartButton = document.querySelector<HTMLButtonElement>("#processing-start-button")!;
 const grabberStartButton = document.querySelector<HTMLButtonElement>("#grabber-start-button")!;
 const grabberActionLabel = document.querySelector<HTMLElement>("#grabber-action-label")!;
 const materialRefreshButton = document.querySelector<HTMLButtonElement>("#material-refresh-button")!;
 const dialogueStopButton = document.querySelector<HTMLButtonElement>("#dialogue-stop-button")!;
-const subtitleStopButton = document.querySelector<HTMLButtonElement>("#subtitle-stop-button")!;
 const processingStopButton = document.querySelector<HTMLButtonElement>("#processing-stop-button")!;
 const grabberStopButton = document.querySelector<HTMLButtonElement>("#grabber-stop-button")!;
 const forceTranscribe = document.querySelector<HTMLInputElement>("#force-transcribe")!;
@@ -556,19 +417,9 @@ const grabQuality = document.querySelector<HTMLSelectElement>("#grab-quality")!;
 const grabSubtitleOptions = document.querySelector<HTMLElement>("#grab-subtitle-options")!;
 const statusChip = document.querySelector<HTMLElement>("#status-chip")!;
 const dialogueRunMessage = document.querySelector<HTMLElement>("#dialogue-run-message")!;
-const subtitleRunMessage = document.querySelector<HTMLElement>("#subtitle-run-message")!;
 const processingRunMessage = document.querySelector<HTMLElement>("#processing-run-message")!;
 const grabberRunMessage = document.querySelector<HTMLElement>("#grabber-run-message")!;
 const dialogueOutputPath = document.querySelector<HTMLElement>("#dialogue-output-path")!;
-const subtitleOutputPath = document.querySelector<HTMLElement>("#subtitle-output-path")!;
-const subtitleVideoPath = document.querySelector<HTMLElement>("#subtitle-video-path")!;
-const subtitleProjectTitle = document.querySelector<HTMLElement>("#subtitle-project-title")!;
-const subtitleDirtyChip = document.querySelector<HTMLElement>("#subtitle-dirty-chip")!;
-const subtitleKeptRuntime = document.querySelector<HTMLElement>("#subtitle-kept-runtime")!;
-const subtitleKeptCount = document.querySelector<HTMLElement>("#subtitle-kept-count")!;
-const subtitleDroppedCount = document.querySelector<HTMLElement>("#subtitle-dropped-count")!;
-const subtitleReviewCount = document.querySelector<HTMLElement>("#subtitle-review-count")!;
-const subtitleSegmentList = document.querySelector<HTMLElement>("#subtitle-segment-list")!;
 const processingOutputPath = document.querySelector<HTMLElement>("#processing-output-path")!;
 const grabberOutputPath = document.querySelector<HTMLElement>("#grabber-output-path")!;
 const materialGallery = document.querySelector<HTMLElement>("#material-gallery")!;
@@ -615,71 +466,29 @@ function renderPhases() {
 function setActiveWorkflow(workflow: Workflow) {
   activeWorkflow = workflow;
   dialogueTab.classList.toggle("active", workflow === "dialogue");
-  subtitlesTab.classList.toggle("active", workflow === "subtitles");
   processingTab.classList.toggle("active", workflow === "processing");
   grabberTab.classList.toggle("active", workflow === "grabber");
   dialoguePanel.classList.toggle("active", workflow === "dialogue");
-  subtitlesPanel.classList.toggle("active", workflow === "subtitles");
   processingPanel.classList.toggle("active", workflow === "processing");
   grabberPanel.classList.toggle("active", workflow === "grabber");
   renderPhases();
 }
 
-function refreshSubtitleControls(running = currentStatus.status === "running") {
-  const hasProject = subtitleProject !== null;
-  subtitleLoadButton.disabled = running || !subtitleProjectPath.value.trim();
-  subtitleProjectBrowseButton.disabled = running;
-  subtitleSaveButton.disabled = running || !hasProject || !subtitleDirty;
-  subtitleRenderButton.disabled = running || !hasProject;
-  subtitleStopButton.disabled = !running;
-  subtitleDirtyChip.className = `runtime-chip ${subtitleDirty ? "pending" : "ready"}`;
-  subtitleDirtyChip.textContent = subtitleDirty ? "Unsaved" : "Saved";
-}
-
 function setRunControls(running: boolean) {
-  dialoguePrepareButton.disabled = running;
   dialogueStartButton.disabled = running;
   processingStartButton.disabled = running;
   dialogueStopButton.disabled = !running;
-  subtitleStopButton.disabled = !running;
   processingStopButton.disabled = !running;
   grabberStopButton.disabled = !running;
   dialogueBrowseButton.disabled = running;
   processingBrowseButton.disabled = running;
   grabOutputBrowseButton.disabled = running;
   materialRefreshButton.disabled = running;
-  refreshSubtitleControls(running);
   applyGrabControlState(running);
 }
 
 function workflowForStatus(): Workflow {
   return runningWorkflow ?? activeWorkflow;
-}
-
-function runMessageFor(workflow: Workflow): HTMLElement {
-  if (workflow === "dialogue") {
-    return dialogueRunMessage;
-  }
-  if (workflow === "subtitles") {
-    return subtitleRunMessage;
-  }
-  if (workflow === "processing") {
-    return processingRunMessage;
-  }
-  return grabberRunMessage;
-}
-
-function outputPathFor(workflow: Workflow): HTMLElement {
-  if (workflow === "dialogue") {
-    return dialogueOutputPath;
-  }
-  if (workflow === "subtitles") {
-    return subtitleOutputPath;
-  }
-  if (workflow === "processing") {
-    return processingOutputPath;
-  }
-  return grabberOutputPath;
 }
 
 function setStatus(status: ConversionStatus) {
@@ -696,8 +505,18 @@ function setStatus(status: ConversionStatus) {
           ? "Running"
           : "Ready";
 
-  const runMessage = runMessageFor(workflow);
-  const outputPath = outputPathFor(workflow);
+  const runMessage =
+    workflow === "dialogue"
+      ? dialogueRunMessage
+      : workflow === "processing"
+        ? processingRunMessage
+        : grabberRunMessage;
+  const outputPath =
+    workflow === "dialogue"
+      ? dialogueOutputPath
+      : workflow === "processing"
+        ? processingOutputPath
+        : grabberOutputPath;
   runMessage.textContent = status.message;
   outputPath.textContent = status.outputPath ?? (workflow === "grabber" ? grabOutputDir.value.trim() : "");
   setRunControls(running);
@@ -707,16 +526,6 @@ function setStatus(status: ConversionStatus) {
   }
   if (!running) {
     runningWorkflow = null;
-  }
-  if (
-    workflow === "dialogue" &&
-    status.status === "complete" &&
-    status.message === "Subtitle project is ready" &&
-    pendingPreparedProjectPath
-  ) {
-    const projectPath = pendingPreparedProjectPath;
-    pendingPreparedProjectPath = "";
-    void loadSubtitleProject(projectPath);
   }
 }
 
@@ -733,230 +542,6 @@ function setRuntimeStatus(status: RuntimeStatus) {
   runtimeChip.className = `runtime-chip ${status.ready ? "ready" : "pending"}`;
   runtimeChip.textContent = status.ready ? "Ready" : "First-run setup";
   runtimeMessage.textContent = status.message;
-}
-
-function segmentEnabled(segment: SubtitleSegment): boolean {
-  return segment.enabled !== false;
-}
-
-function segmentDuration(segment: SubtitleSegment): number {
-  const start = Number(segment.start);
-  const end = Number(segment.end);
-  if (!Number.isFinite(start) || !Number.isFinite(end)) {
-    return 0;
-  }
-  return Math.max(0, end - start);
-}
-
-function formatSeconds(value: number): string {
-  return Number.isFinite(value) ? value.toFixed(3) : "0.000";
-}
-
-function subtitleReviewReasons(segment: SubtitleSegment): string {
-  return (segment.reviewReasons ?? []).join(", ");
-}
-
-function renderSubtitleStats() {
-  if (!subtitleProject) {
-    subtitleProjectTitle.textContent = "No project loaded";
-    subtitleKeptRuntime.textContent = "0:00";
-    subtitleKeptCount.textContent = "0";
-    subtitleDroppedCount.textContent = "0";
-    subtitleReviewCount.textContent = "0";
-    subtitleVideoPath.textContent = "";
-    refreshSubtitleControls();
-    return;
-  }
-
-  const segments = subtitleProject.segments;
-  const kept = segments.filter(segmentEnabled);
-  const dropped = segments.length - kept.length;
-  const reviewCount = segments.filter((segment) => segment.review).length;
-  const keptDuration = kept.reduce((total, segment) => total + segmentDuration(segment), 0);
-  subtitleProjectTitle.textContent = `${segments.length} planned segments`;
-  subtitleKeptRuntime.textContent = formatDuration(keptDuration) ?? "0:00";
-  subtitleKeptCount.textContent = String(kept.length);
-  subtitleDroppedCount.textContent = String(dropped);
-  subtitleReviewCount.textContent = String(reviewCount);
-  subtitleVideoPath.textContent = subtitleProject.video ? `Source: ${subtitleProject.video}` : "";
-  refreshSubtitleControls();
-}
-
-function markSubtitleDirty() {
-  subtitleDirty = true;
-  renderSubtitleStats();
-}
-
-function updateSegmentDuration(segment: SubtitleSegment) {
-  segment.duration = Number(segmentDuration(segment).toFixed(3));
-}
-
-function renderSubtitleSegments() {
-  subtitleSegmentList.replaceChildren();
-  if (!subtitleProject) {
-    const empty = document.createElement("p");
-    empty.className = "empty-note";
-    empty.textContent = "Load a subtitle project first.";
-    subtitleSegmentList.append(empty);
-    return;
-  }
-
-  subtitleProject.segments.forEach((segment, index) => {
-    const row = document.createElement("article");
-    row.className = "subtitle-segment";
-    row.classList.toggle("disabled", !segmentEnabled(segment));
-    row.classList.toggle("review", segment.review === true);
-
-    const keepLabel = document.createElement("label");
-    keepLabel.className = "checkbox-label segment-keep";
-    const keepInput = document.createElement("input");
-    keepInput.type = "checkbox";
-    keepInput.checked = segmentEnabled(segment);
-    keepInput.addEventListener("change", () => {
-      segment.enabled = keepInput.checked;
-      row.classList.toggle("disabled", !keepInput.checked);
-      markSubtitleDirty();
-    });
-    const keepText = document.createElement("span");
-    keepText.textContent = "Keep";
-    keepLabel.append(keepInput, keepText);
-
-    const meta = document.createElement("div");
-    meta.className = "segment-meta";
-    const id = document.createElement("strong");
-    id.textContent = segment.id ?? `segment-${String(index + 1).padStart(4, "0")}`;
-    const details = document.createElement("small");
-    const source = segment.source ? ` | ${segment.source}` : "";
-    const reasons = subtitleReviewReasons(segment);
-    details.textContent = `${formatDuration(segmentDuration(segment)) ?? "0:00"}${source}${
-      reasons ? ` | ${reasons}` : ""
-    }`;
-    meta.append(id, details);
-
-    const startLabel = document.createElement("label");
-    startLabel.className = "segment-time";
-    const startText = document.createElement("span");
-    startText.textContent = "Start";
-    const startInput = document.createElement("input");
-    startInput.type = "number";
-    startInput.min = "0";
-    startInput.step = "0.01";
-    startInput.value = formatSeconds(segment.start);
-    startLabel.append(startText, startInput);
-
-    const endLabel = document.createElement("label");
-    endLabel.className = "segment-time";
-    const endText = document.createElement("span");
-    endText.textContent = "End";
-    const endInput = document.createElement("input");
-    endInput.type = "number";
-    endInput.min = "0";
-    endInput.step = "0.01";
-    endInput.value = formatSeconds(segment.end);
-    endLabel.append(endText, endInput);
-
-    const updateTiming = () => {
-      const start = Math.max(0, Number(startInput.value) || 0);
-      const end = Math.max(start, Number(endInput.value) || start);
-      segment.start = Number(start.toFixed(3));
-      segment.end = Number(end.toFixed(3));
-      startInput.value = formatSeconds(segment.start);
-      endInput.value = formatSeconds(segment.end);
-      updateSegmentDuration(segment);
-      details.textContent = `${formatDuration(segmentDuration(segment)) ?? "0:00"}${source}${
-        reasons ? ` | ${reasons}` : ""
-      }`;
-      markSubtitleDirty();
-    };
-    startInput.addEventListener("change", updateTiming);
-    endInput.addEventListener("change", updateTiming);
-
-    const text = document.createElement("textarea");
-    text.className = "segment-text";
-    text.rows = 2;
-    text.value = segment.text ?? "";
-    text.placeholder = "Subtitle text";
-    text.addEventListener("input", () => {
-      segment.text = text.value;
-      markSubtitleDirty();
-    });
-
-    row.append(keepLabel, meta, startLabel, endLabel, text);
-    subtitleSegmentList.append(row);
-  });
-}
-
-async function loadSubtitleProject(path = subtitleProjectPath.value.trim()) {
-  if (!path) {
-    return;
-  }
-  setActiveWorkflow("subtitles");
-  try {
-    const data = await invoke<SubtitleProjectData>("load_subtitle_project", {
-      options: { projectPath: path },
-    });
-    subtitleProject = data.project;
-    subtitleDirty = false;
-    subtitleProjectPath.value = data.projectPath;
-    subtitleOutputPath.textContent = data.outputPath;
-    subtitleRunMessage.textContent = "Project loaded";
-    renderSubtitleStats();
-    renderSubtitleSegments();
-    setStatus({
-      status: "idle",
-      phase: "filter",
-      message: "Edit subtitles before commit",
-      outputPath: data.outputPath,
-    });
-  } catch (error) {
-    setStatus({
-      status: "error",
-      phase: "error",
-      message: String(error),
-    });
-  }
-}
-
-async function saveSubtitleProject() {
-  if (!subtitleProject) {
-    return;
-  }
-  await invoke("save_subtitle_project", {
-    options: {
-      projectPath: subtitleProjectPath.value.trim(),
-      project: subtitleProject,
-    },
-  });
-  subtitleDirty = false;
-  subtitleRunMessage.textContent = "Project saved";
-  renderSubtitleStats();
-}
-
-async function commitSubtitleProject() {
-  if (!subtitleProject) {
-    return;
-  }
-  setActiveWorkflow("subtitles");
-  runningWorkflow = "subtitles";
-  logOutput.textContent = "";
-  try {
-    if (subtitleDirty) {
-      await saveSubtitleProject();
-    }
-    const outputPath = await invoke<string>("start_project_render", {
-      options: {
-        projectPath: subtitleProjectPath.value.trim(),
-        outputPath: subtitleOutputPath.textContent?.trim() ?? "",
-      },
-    });
-    subtitleOutputPath.textContent = outputPath;
-  } catch (error) {
-    setStatus({
-      status: "error",
-      phase: "error",
-      message: String(error),
-    });
-  }
 }
 
 function setGrabOutputDir(path: string) {
@@ -1205,21 +790,8 @@ async function chooseVideo(target: HTMLInputElement, workflow: Workflow, default
     setStatus({
       status: "idle",
       phase: "inspect",
-      message: workflow === "dialogue" ? "Ready to prepare" : "Ready to transcode",
+      message: workflow === "dialogue" ? "Ready to convert" : "Ready to transcode",
     });
-  }
-}
-
-async function chooseSubtitleProject() {
-  const selected = await open({
-    multiple: false,
-    directory: false,
-    filters: [{ name: "Dialogue project", extensions: ["json"] }],
-  });
-  if (typeof selected === "string") {
-    subtitleProjectPath.value = selected;
-    refreshSubtitleControls();
-    await loadSubtitleProject(selected);
   }
 }
 
@@ -1241,28 +813,12 @@ async function chooseDirectory() {
 }
 
 dialogueTab.addEventListener("click", () => setActiveWorkflow("dialogue"));
-subtitlesTab.addEventListener("click", () => setActiveWorkflow("subtitles"));
 processingTab.addEventListener("click", () => {
   setActiveWorkflow("processing");
   void loadMaterialGallery();
 });
 grabberTab.addEventListener("click", () => setActiveWorkflow("grabber"));
 dialogueBrowseButton.addEventListener("click", () => chooseVideo(dialogueVideoPath, "dialogue"));
-subtitleProjectBrowseButton.addEventListener("click", () => void chooseSubtitleProject());
-subtitleLoadButton.addEventListener("click", () => void loadSubtitleProject());
-subtitleProjectPath.addEventListener("input", () => refreshSubtitleControls());
-subtitleSaveButton.addEventListener("click", async () => {
-  try {
-    await saveSubtitleProject();
-  } catch (error) {
-    setStatus({
-      status: "error",
-      phase: "error",
-      message: String(error),
-    });
-  }
-});
-subtitleRenderButton.addEventListener("click", () => void commitSubtitleProject());
 processingBrowseButton.addEventListener("click", () =>
   chooseVideo(processingVideoPath, "processing", grabOutputDir.value.trim()),
 );
@@ -1287,36 +843,6 @@ slowSpeed.addEventListener("input", () => updateSpeed(slowSpeed.value));
 slowSpeedRange.addEventListener("input", () => updateSpeed(slowSpeedRange.value));
 presetButtons.forEach((button) => {
   button.addEventListener("click", () => updateSpeed(button.dataset.speed ?? "0.50"));
-});
-
-dialoguePrepareButton.addEventListener("click", async () => {
-  setActiveWorkflow("dialogue");
-  runningWorkflow = "dialogue";
-  logOutput.textContent = "";
-  pendingPreparedProjectPath = "";
-  try {
-    const expectedProject = await invoke<string>("start_project_prepare", {
-      options: {
-        videoPath: dialogueVideoPath.value.trim(),
-        forceTranscribe: forceTranscribe.checked,
-        prePad: numberValue("pre-pad"),
-        postPad: numberValue("post-pad"),
-        mergeGap: numberValue("merge-gap"),
-        keepCueClasses: "dialogue",
-        keepSources: "dialogue,mixed",
-      },
-    });
-    pendingPreparedProjectPath = expectedProject;
-    subtitleProjectPath.value = expectedProject;
-    dialogueOutputPath.textContent = expectedProject;
-    refreshSubtitleControls();
-  } catch (error) {
-    setStatus({
-      status: "error",
-      phase: "error",
-      message: String(error),
-    });
-  }
 });
 
 dialogueStartButton.addEventListener("click", async () => {
@@ -1441,7 +967,6 @@ async function stopCurrentRun() {
 }
 
 dialogueStopButton.addEventListener("click", stopCurrentRun);
-subtitleStopButton.addEventListener("click", stopCurrentRun);
 processingStopButton.addEventListener("click", stopCurrentRun);
 grabberStopButton.addEventListener("click", stopCurrentRun);
 
@@ -1450,7 +975,6 @@ listen<ConversionStatus>("conversion-state", ({ payload }) => setStatus(payload)
 listen<RuntimeStatus>("runtime-state", ({ payload }) => setRuntimeStatus(payload));
 setActiveWorkflow(activeWorkflow);
 setStatus(currentStatus);
-renderSubtitleStats();
 updateSpeed(slowSpeed.value);
 invoke<string>("get_default_grab_output_dir")
   .then((path) => {
