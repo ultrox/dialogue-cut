@@ -549,10 +549,16 @@ app.innerHTML = `
                 <i data-lucide="skip-forward"></i>
               </button>
             </div>
-            <label class="checkbox-label follow-toggle">
-              <input id="player-follow" type="checkbox" checked />
-              <span>Follow playback</span>
-            </label>
+            <div class="player-toggles">
+              <label class="checkbox-label">
+                <input id="player-dialogue-only" type="checkbox" />
+                <span>Dialogue only</span>
+              </label>
+              <label class="checkbox-label">
+                <input id="player-follow" type="checkbox" checked />
+                <span>Follow playback</span>
+              </label>
+            </div>
           </div>
         </section>
 
@@ -746,6 +752,7 @@ const playerNote = byId<HTMLElement>("player-note");
 const playerVideo = byId<HTMLVideoElement>("player-video");
 const playerOffsetInput = byId<HTMLInputElement>("player-offset");
 const playerFollow = byId<HTMLInputElement>("player-follow");
+const playerDialogueOnly = byId<HTMLInputElement>("player-dialogue-only");
 const playerPrevCue = byId<HTMLButtonElement>("player-prev-cue");
 const playerReplayCue = byId<HTMLButtonElement>("player-replay-cue");
 const playerNextCue = byId<HTMLButtonElement>("player-next-cue");
@@ -1777,8 +1784,34 @@ playerReplayCue.addEventListener("click", () => {
     seekToCue(index);
   }
 });
+// In dialogue-only mode, gaps between cues are skipped: once playback leaves
+// a cue and the next one is still ahead, jump to it (minus the jump offset).
+// The 0.35s margin keeps tiny gaps playing through and prevents re-jumping
+// inside the offset lead-in we just landed on.
+function skipGapIfNeeded(time: number) {
+  if (
+    !playerDialogueOnly.checked ||
+    playerVideo.paused ||
+    playerVideo.seeking ||
+    playerCues.length === 0 ||
+    cueIndexAt(time) !== -1
+  ) {
+    return;
+  }
+  const next = playerCues.find((cue) => cue.start > time);
+  if (!next) {
+    return;
+  }
+  const target = next.start - playerOffset;
+  if (target > time + 0.35) {
+    playerVideo.currentTime = target;
+  }
+}
+
 playerVideo.addEventListener("timeupdate", () => {
-  setActivePlayerCue(cueIndexAt(playerVideo.currentTime));
+  const time = playerVideo.currentTime;
+  setActivePlayerCue(cueIndexAt(time));
+  skipGapIfNeeded(time);
 });
 
 async function stopCurrentRun() {

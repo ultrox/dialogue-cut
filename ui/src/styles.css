@@ -592,8 +592,11 @@ input:focus {
   padding: 0 12px;
 }
 
-.follow-toggle {
+.player-toggles {
   margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 16px;
 }
 
 .cue-list {
