@@ -499,30 +499,7 @@ app.innerHTML = `
       </div>
 
       <div id="player-panel" class="tab-panel">
-        <section class="section-block source-block">
-          <div class="section-heading">
-            <div>
-              <span class="eyebrow">Source</span>
-              <h2>Select a video and subtitles</h2>
-            </div>
-            <i data-lucide="file-text"></i>
-          </div>
-          <div class="file-row">
-            <input id="player-video-path" type="text" placeholder="/path/to/movie.mp4" spellcheck="false" />
-            <button id="player-video-browse" class="icon-button" type="button" title="Choose video">
-              <i data-lucide="folder-open"></i>
-            </button>
-          </div>
-          <div class="file-row subtitle-row">
-            <select id="player-subtitle"></select>
-            <button id="player-subtitle-browse" class="icon-button" type="button" title="Choose subtitle file">
-              <i data-lucide="folder-open"></i>
-            </button>
-          </div>
-          <p id="player-note" class="field-note"></p>
-        </section>
-
-        <section class="section-block">
+        <section class="section-block player-main">
           <video id="player-video" class="player-video" controls preload="metadata"></video>
           <div class="player-controls">
             <label class="player-offset">
@@ -562,7 +539,7 @@ app.innerHTML = `
           </div>
         </section>
 
-        <section class="section-block">
+        <section class="section-block player-cues-block">
           <div class="section-heading">
             <div>
               <span class="eyebrow">Subtitles</span>
@@ -573,6 +550,29 @@ app.innerHTML = `
           <div id="player-cues" class="cue-list">
             <p class="empty-note">Choose a video to load its subtitles.</p>
           </div>
+        </section>
+
+        <section class="section-block player-source">
+          <div class="section-heading">
+            <div>
+              <span class="eyebrow">Source</span>
+              <h2>Files</h2>
+            </div>
+            <i data-lucide="file-text"></i>
+          </div>
+          <div class="file-row">
+            <input id="player-video-path" type="text" placeholder="/path/to/movie.mp4" spellcheck="false" />
+            <button id="player-video-browse" class="icon-button" type="button" title="Choose video">
+              <i data-lucide="folder-open"></i>
+            </button>
+          </div>
+          <div class="file-row subtitle-row">
+            <select id="player-subtitle"></select>
+            <button id="player-subtitle-browse" class="icon-button" type="button" title="Choose subtitle file">
+              <i data-lucide="folder-open"></i>
+            </button>
+          </div>
+          <p id="player-note" class="field-note"></p>
         </section>
       </div>
 
