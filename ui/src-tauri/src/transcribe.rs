@@ -386,10 +386,11 @@ fn run_transcribe_steps(
         .arg(work_dir)
         .args(["--output-name", "transcript"])
         .args(["--condition-on-previous-text", "False"])
-        // Anchor cue boundaries to spoken words instead of decode windows and
-        // skip silence-induced hallucination loops ("äh äh äh..." for 30s).
-        .args(["--word-timestamps", "True"])
-        .args(["--hallucination-silence-threshold", "2"]);
+        // Anchor cue boundaries to spoken words instead of decode windows.
+        // Note: --hallucination-silence-threshold is deliberately NOT set;
+        // its detector misfires around natural pauses and drops real
+        // dialogue. Hallucination cleanup happens in the player instead.
+        .args(["--word-timestamps", "True"]);
     if language != "auto" {
         command.args(["--language", language]);
     }
