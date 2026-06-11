@@ -1248,6 +1248,9 @@ async function loadSubtitleProject(path = subtitleProjectPath.value.trim()) {
       message: "Edit subtitles before commit",
       outputPath: data.outputPath,
     });
+    if (!subtitlePreviewReady) {
+      void buildSubtitlePreviewProxy();
+    }
   } catch (error) {
     setStatus({
       status: "error",
@@ -1669,6 +1672,15 @@ subtitlePreviewVideo.addEventListener("loadedmetadata", () => {
 subtitlePreviewVideo.addEventListener("timeupdate", () => {
   enforceSkipPlayback();
   updateTimelinePlayhead();
+});
+subtitlePreviewVideo.addEventListener("error", () => {
+  if (!subtitlePreviewVideo.currentSrc) {
+    return;
+  }
+  subtitlePreviewTitle.textContent = "Preview failed to load";
+  subtitleRunMessage.textContent = "Rebuild the preview MP4";
+  subtitlePreviewReady = false;
+  refreshSubtitleControls();
 });
 processingBrowseButton.addEventListener("click", () =>
   chooseVideo(processingVideoPath, "processing", grabOutputDir.value.trim()),
