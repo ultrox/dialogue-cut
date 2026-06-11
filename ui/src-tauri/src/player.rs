@@ -2,7 +2,10 @@
 //! follow a movie cue by cue before building a dialogue-only cut.
 
 use serde::{Deserialize, Serialize};
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 const MAX_SUBTITLE_BYTES: u64 = 10 * 1024 * 1024;
 
@@ -16,6 +19,19 @@ pub(crate) struct SubtitleListOptions {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SubtitleReadOptions {
     pub(crate) path: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct IgnoreLoadOptions {
+    pub(crate) subtitle_path: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct IgnoreSaveOptions {
+    pub(crate) subtitle_path: String,
+    pub(crate) keys: Vec<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -78,6 +94,41 @@ pub(crate) fn list_subtitle_files(video_path: &Path) -> Vec<SubtitleFile> {
         .into_iter()
         .map(|(_, file_name, path)| SubtitleFile { path, file_name })
         .collect()
+}
+
+// Manually ignored cues live in a sidecar next to the subtitles
+// (movie.de.srt -> movie.de.srt.ignore.json) so review decisions survive
+// restarts and travel with the file.
+fn ignore_file_path(subtitle_path: &Path) -> Result<PathBuf, String> {
+    if !is_subtitle(subtitle_path) {
+        return Err("Choose an .srt or .vtt subtitle file.".into());
+    }
+    Ok(PathBuf::from(format!(
+        "{}.ignore.json",
+        subtitle_path.display()
+    )))
+}
+
+pub(crate) fn load_cue_ignores(subtitle_path: &Path) -> Result<Vec<String>, String> {
+    let path = ignore_file_path(subtitle_path)?;
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+    let content = fs::read_to_string(&path)
+        .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
+    serde_json::from_str(&content)
+        .map_err(|error| format!("Could not parse {}: {error}", path.display()))
+}
+
+pub(crate) fn save_cue_ignores(subtitle_path: &Path, keys: &[String]) -> Result<(), String> {
+    let path = ignore_file_path(subtitle_path)?;
+    if keys.is_empty() {
+        let _ = fs::remove_file(&path);
+        return Ok(());
+    }
+    let json = serde_json::to_string_pretty(keys)
+        .map_err(|error| format!("Could not encode ignore list: {error}"))?;
+    fs::write(&path, json).map_err(|error| format!("Could not save {}: {error}", path.display()))
 }
 
 pub(crate) fn read_subtitle_file(path: &Path) -> Result<String, String> {

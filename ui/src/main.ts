@@ -1509,6 +1509,43 @@ let playerActiveCue = -1;
 let playerOffset = 0.5;
 let playerDroppedCues = 0;
 let playerClampedCues = 0;
+let playerSubtitleFile = "";
+let playerIgnoredKeys = new Set<string>();
+
+// Identifies a cue across reloads of the same subtitle file.
+function cueKey(cue: SubtitleCue): string {
+  return `${Math.round(cue.start * 1000)}|${cue.text.slice(0, 24)}`;
+}
+
+function isCueIgnored(cue: SubtitleCue): boolean {
+  return playerIgnoredKeys.has(cueKey(cue));
+}
+
+async function persistCueIgnores() {
+  if (!playerSubtitleFile) {
+    return;
+  }
+  try {
+    await invoke("save_cue_ignores", {
+      options: { subtitlePath: playerSubtitleFile, keys: [...playerIgnoredKeys] },
+    });
+  } catch (error) {
+    appendLog({ stream: "stderr", line: String(error) });
+  }
+}
+
+function toggleCueIgnore(index: number) {
+  const cue = playerCues[index];
+  const key = cueKey(cue);
+  if (playerIgnoredKeys.has(key)) {
+    playerIgnoredKeys.delete(key);
+  } else {
+    playerIgnoredKeys.add(key);
+  }
+  playerCueButtons[index]?.classList.toggle("ignored", playerIgnoredKeys.has(key));
+  updatePlayerSummary();
+  void persistCueIgnores();
+}
 
 function parseSubtitleTimestamp(raw: string): number | null {
   const match = raw.trim().match(/^(?:(\d+):)?(\d{1,2}):(\d{2})[.,](\d{1,3})$/);
@@ -1667,6 +1704,9 @@ function dialogueOnlyDuration(): number {
   let rangeStart = -1;
   let rangeEnd = -1;
   for (const cue of playerCues) {
+    if (isCueIgnored(cue)) {
+      continue;
+    }
     const start = Math.max(0, cue.start - playerOffset);
     if (rangeEnd >= 0 && start <= rangeEnd + 0.35) {
       rangeEnd = Math.max(rangeEnd, cue.end);
@@ -1691,7 +1731,9 @@ function updatePlayerSummary() {
   }
   const dialogue = dialogueOnlyDuration();
   let summary = `${playerCues.length} cues`;
+  const ignoredCount = playerCues.filter(isCueIgnored).length;
   const cleanupParts = [
+    ignoredCount > 0 ? `${ignoredCount} ignored` : "",
     playerDroppedCues > 0 ? `${playerDroppedCues} removed` : "",
     playerClampedCues > 0 ? `${playerClampedCues} shortened` : "",
   ].filter(Boolean);
@@ -1721,6 +1763,7 @@ function renderPlayerCues() {
   playerCues.forEach((cue, index) => {
     const button = document.createElement("button");
     button.className = "cue-row";
+    button.classList.toggle("ignored", isCueIgnored(cue));
     button.type = "button";
     button.addEventListener("click", () => seekToCue(index));
 
@@ -1730,8 +1773,16 @@ function renderPlayerCues() {
     const text = document.createElement("span");
     text.className = "cue-text";
     text.textContent = cue.text;
+    const ignore = document.createElement("span");
+    ignore.className = "cue-ignore";
+    ignore.textContent = "✕";
+    ignore.title = "Ignore this segment";
+    ignore.addEventListener("click", (event) => {
+      event.stopPropagation();
+      toggleCueIgnore(index);
+    });
 
-    button.append(time, text);
+    button.append(time, text, ignore);
     playerCueList.append(button);
     playerCueButtons.push(button);
   });
@@ -1740,9 +1791,16 @@ function renderPlayerCues() {
 async function loadPlayerSubtitleFile(path: string) {
   try {
     const content = await invoke<string>("read_subtitle_file", { options: { path } });
+    const ignoredKeys = await invoke<string[]>("load_cue_ignores", {
+      options: { subtitlePath: path },
+    });
+    playerSubtitleFile = path;
+    playerIgnoredKeys = new Set(ignoredKeys);
     playerCues = cleanCues(parseSubtitles(content));
     renderPlayerCues();
   } catch (error) {
+    playerSubtitleFile = "";
+    playerIgnoredKeys = new Set();
     playerCues = [];
     renderPlayerCues();
     playerCueCount.textContent = "Could not load subtitles";
@@ -1831,7 +1889,7 @@ function stepPlayerCue(direction: -1 | 1) {
   const time = playerVideo.currentTime;
   let target: number;
   if (direction === 1) {
-    target = playerCues.findIndex((cue) => cue.start > time + 0.05);
+    target = playerCues.findIndex((cue) => cue.start > time + 0.05 && !isCueIgnored(cue));
     if (target === -1) {
       return;
     }
@@ -1839,7 +1897,10 @@ function stepPlayerCue(direction: -1 | 1) {
     // A margin so that pressing back twice moves to the previous cue
     // instead of restarting the current one each time.
     target = playerCues.length - 1;
-    while (target >= 0 && playerCues[target].start >= time - 1) {
+    while (
+      target >= 0 &&
+      (playerCues[target].start >= time - 1 || isCueIgnored(playerCues[target]))
+    ) {
       target -= 1;
     }
     if (target < 0) {
@@ -1894,12 +1955,15 @@ function skipGapIfNeeded(time: number) {
     !playerDialogueOnly.checked ||
     playerVideo.paused ||
     playerVideo.seeking ||
-    playerCues.length === 0 ||
-    cueIndexAt(time) !== -1
+    playerCues.length === 0
   ) {
     return;
   }
-  const next = playerCues.find((cue) => cue.start > time);
+  const insideIndex = cueIndexAt(time);
+  if (insideIndex !== -1 && !isCueIgnored(playerCues[insideIndex])) {
+    return;
+  }
+  const next = playerCues.find((cue) => cue.start > time && !isCueIgnored(cue));
   if (!next) {
     return;
   }

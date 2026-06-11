@@ -32,7 +32,9 @@ use grabber::{
     default_grab_output_dir, probe_grab_inner, run_grab, subtitle_language_spec, GrabMetadata,
     GrabOptions, GrabProbeOptions,
 };
-use player::{SubtitleFile, SubtitleListOptions, SubtitleReadOptions};
+use player::{
+    IgnoreLoadOptions, IgnoreSaveOptions, SubtitleFile, SubtitleListOptions, SubtitleReadOptions,
+};
 use process::{
     existing_file, set_child_pid, start_background_job, terminate_process, ConversionState,
 };
@@ -183,6 +185,16 @@ fn read_subtitle_file(options: SubtitleReadOptions) -> Result<String, String> {
 }
 
 #[tauri::command]
+fn load_cue_ignores(options: IgnoreLoadOptions) -> Result<Vec<String>, String> {
+    player::load_cue_ignores(std::path::Path::new(options.subtitle_path.trim()))
+}
+
+#[tauri::command]
+fn save_cue_ignores(options: IgnoreSaveOptions) -> Result<(), String> {
+    player::save_cue_ignores(std::path::Path::new(options.subtitle_path.trim()), &options.keys)
+}
+
+#[tauri::command]
 fn get_default_grab_output_dir() -> Result<String, String> {
     let output_dir = default_grab_output_dir();
     fs::create_dir_all(&output_dir)
@@ -305,6 +317,8 @@ pub fn run() {
             serve_media,
             list_subtitle_files,
             read_subtitle_file,
+            load_cue_ignores,
+            save_cue_ignores,
             probe_grab,
             start_grab,
             stop_conversion

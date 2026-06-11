@@ -609,7 +609,7 @@ input:focus {
 
 .cue-row {
   display: grid;
-  grid-template-columns: 122px minmax(0, 1fr);
+  grid-template-columns: 122px minmax(0, 1fr) 22px;
   gap: 10px;
   align-items: baseline;
   padding: 8px 10px;
@@ -618,6 +618,34 @@ input:focus {
   text-align: left;
   background: #f1f6f3;
   cursor: pointer;
+}
+
+.cue-ignore {
+  justify-self: end;
+  color: #93a39b;
+  font-size: 12px;
+  line-height: 1;
+  padding: 2px 5px;
+  border-radius: 4px;
+  visibility: hidden;
+}
+
+.cue-row:hover .cue-ignore,
+.cue-row.ignored .cue-ignore {
+  visibility: visible;
+}
+
+.cue-ignore:hover {
+  color: #b3413a;
+  background: #f4e3e1;
+}
+
+.cue-row.ignored {
+  opacity: 0.45;
+}
+
+.cue-row.ignored .cue-text {
+  text-decoration: line-through;
 }
 
 .cue-row:hover {
