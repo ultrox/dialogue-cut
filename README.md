@@ -54,6 +54,34 @@ The output is written beside the source video:
 movie.slow-0.50x.mp4
 ```
 
+## Converter
+
+In the desktop app, open `Converter`, choose a video (typically an MKV), and
+start the conversion. The MP4 is written beside the source with the same name
+(or `movie.converted.mp4` if that name is taken). Two modes:
+
+- `Re-encode H.264/AAC` (default): most compatible for editing; re-encodes
+  everything, so it takes a while.
+- `Fast remux`: copies the video stream as-is into MP4 and converts audio to
+  AAC. Nearly instant, but editors may struggle with HEVC/AV1 sources.
+
+Embedded subtitles and chapters are dropped; only the first video and audio
+streams are kept.
+
+## Transcription
+
+In the desktop app, open `Transcription`, choose a video or audio file, pick
+the spoken language (German by default, or auto-detect), and tick the output
+files you want. The app extracts the first audio track, transcribes it with
+MLX Whisper, and writes the selected files beside the source:
+
+- `movie.de.srt` / `movie.de.vtt` — subtitles (on by default)
+- `movie.de.txt` — plain text transcript (on by default)
+- `movie.de.json` — raw Whisper output with segments and timestamps
+- `movie.de.tsv` — start/end/text timestamp table
+
+With auto-detect the language suffix is omitted.
+
 ## Material Grabber
 
 In the desktop app, open `Material grabber`, paste a URL, and click `Start`.

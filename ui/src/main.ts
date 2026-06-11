@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
+  ArrowRightLeft,
+  Captions,
   CheckCircle2,
   Circle,
   FileText,
@@ -17,7 +19,7 @@ import {
   createIcons,
 } from "lucide";
 
-type Workflow = "dialogue" | "processing" | "grabber";
+type Workflow = "dialogue" | "processing" | "converter" | "transcribe" | "grabber";
 
 type ConversionStatus = {
   status: "idle" | "running" | "complete" | "error";
@@ -29,6 +31,11 @@ type ConversionStatus = {
 type ConversionLog = {
   stream: string;
   line: string;
+};
+
+type ConversionProgress = {
+  percent?: number;
+  detail: string;
 };
 
 type RuntimeStatus = {
@@ -81,6 +88,17 @@ const workflowPhases: Record<Workflow, readonly (readonly [string, string])[]> =
     ["inspect", "Inspect source"],
     ["transcode", "Transcode slower"],
   ],
+  converter: [
+    ["setup", "Prepare tools"],
+    ["inspect", "Inspect source"],
+    ["convert", "Convert to MP4"],
+  ],
+  transcribe: [
+    ["setup", "Prepare runtime"],
+    ["extract", "Extract audio"],
+    ["transcribe", "Transcribe speech"],
+    ["collect", "Write subtitles"],
+  ],
   grabber: [
     ["setup", "Prepare downloader"],
     ["fetch", "Fetch metadata"],
@@ -122,6 +140,14 @@ app.innerHTML = `
         <button id="processing-tab" class="tab-button" type="button">
           <i data-lucide="settings-2"></i>
           <span>Video processing</span>
+        </button>
+        <button id="converter-tab" class="tab-button" type="button">
+          <i data-lucide="arrow-right-left"></i>
+          <span>Converter</span>
+        </button>
+        <button id="transcribe-tab" class="tab-button" type="button">
+          <i data-lucide="captions"></i>
+          <span>Transcription</span>
         </button>
         <button id="grabber-tab" class="tab-button" type="button">
           <i data-lucide="hard-drive-download"></i>
@@ -284,7 +310,156 @@ app.innerHTML = `
               <span>Cancel</span>
             </button>
           </div>
+          <div id="processing-progress" class="progress-track" hidden>
+            <span id="processing-progress-fill"></span>
+          </div>
+          <p id="processing-progress-detail" class="field-note"></p>
           <p id="processing-output-path" class="output-path"></p>
+        </section>
+      </div>
+
+      <div id="converter-panel" class="tab-panel">
+        <section class="section-block source-block">
+          <div class="section-heading">
+            <div>
+              <span class="eyebrow">Source</span>
+              <h2>Select a video</h2>
+            </div>
+            <i data-lucide="file-text"></i>
+          </div>
+          <div class="file-row">
+            <input id="converter-video-path" type="text" placeholder="/path/to/movie.mkv" spellcheck="false" />
+            <button id="converter-browse-button" class="icon-button" type="button" title="Choose video">
+              <i data-lucide="folder-open"></i>
+            </button>
+          </div>
+        </section>
+
+        <section class="section-block">
+          <div class="section-heading">
+            <div>
+              <span class="eyebrow">Output profile</span>
+              <h2>MP4 conversion</h2>
+            </div>
+            <i data-lucide="settings-2"></i>
+          </div>
+          <div class="preset-row">
+            <button class="convert-mode-button preset-button active" type="button" data-mode="reencode">Re-encode H.264/AAC</button>
+            <button class="convert-mode-button preset-button" type="button" data-mode="remux">Fast remux</button>
+          </div>
+          <p id="converter-mode-note" class="field-note"></p>
+        </section>
+
+        <section class="section-block run-block">
+          <div class="section-heading compact">
+            <div>
+              <span class="eyebrow">Run</span>
+              <h2 id="converter-run-message">Choose a video file to begin</h2>
+            </div>
+          </div>
+          <div class="action-row">
+            <button id="converter-start-button" class="primary-button" type="button">
+              <i data-lucide="play"></i>
+              <span>Start conversion</span>
+            </button>
+            <button id="converter-stop-button" class="secondary-button" type="button" disabled>
+              <i data-lucide="square"></i>
+              <span>Cancel</span>
+            </button>
+          </div>
+          <div id="converter-progress" class="progress-track" hidden>
+            <span id="converter-progress-fill"></span>
+          </div>
+          <p id="converter-progress-detail" class="field-note"></p>
+          <p id="converter-output-path" class="output-path"></p>
+        </section>
+      </div>
+
+      <div id="transcribe-panel" class="tab-panel">
+        <section class="section-block source-block">
+          <div class="section-heading">
+            <div>
+              <span class="eyebrow">Source</span>
+              <h2>Select a video or audio file</h2>
+            </div>
+            <i data-lucide="file-text"></i>
+          </div>
+          <div class="file-row">
+            <input id="transcribe-video-path" type="text" placeholder="/path/to/movie.mkv" spellcheck="false" />
+            <button id="transcribe-browse-button" class="icon-button" type="button" title="Choose file">
+              <i data-lucide="folder-open"></i>
+            </button>
+          </div>
+        </section>
+
+        <section class="section-block">
+          <div class="section-heading">
+            <div>
+              <span class="eyebrow">Transcript profile</span>
+              <h2>Whisper transcription</h2>
+            </div>
+            <i data-lucide="settings-2"></i>
+          </div>
+          <div class="metadata-grid">
+            <label>
+              <span>Spoken language</span>
+              <select id="transcribe-language">
+                <option value="de" selected>German</option>
+                <option value="en">English</option>
+                <option value="auto">Detect automatically</option>
+              </select>
+            </label>
+            <div>
+              <span class="field-label">Output files</span>
+              <div class="subtitle-options">
+                <label class="checkbox-label">
+                  <input type="checkbox" class="transcribe-format" data-format="srt" checked />
+                  <span>SRT subtitles</span>
+                </label>
+                <label class="checkbox-label">
+                  <input type="checkbox" class="transcribe-format" data-format="vtt" checked />
+                  <span>VTT subtitles</span>
+                </label>
+                <label class="checkbox-label">
+                  <input type="checkbox" class="transcribe-format" data-format="txt" checked />
+                  <span>Plain text transcript</span>
+                </label>
+                <label class="checkbox-label">
+                  <input type="checkbox" class="transcribe-format" data-format="json" />
+                  <span>JSON (raw Whisper output)</span>
+                </label>
+                <label class="checkbox-label">
+                  <input type="checkbox" class="transcribe-format" data-format="tsv" />
+                  <span>TSV (timestamp table)</span>
+                </label>
+              </div>
+            </div>
+          </div>
+          <p class="field-note">The selected files are written beside the source file.</p>
+        </section>
+
+        <section class="section-block run-block">
+          <div class="section-heading compact">
+            <div>
+              <span class="eyebrow">Run</span>
+              <h2 id="transcribe-run-message">Choose a file to begin</h2>
+            </div>
+          </div>
+          <div class="action-row">
+            <button id="transcribe-start-button" class="primary-button" type="button">
+              <i data-lucide="play"></i>
+              <span>Start transcription</span>
+            </button>
+            <button id="transcribe-stop-button" class="secondary-button" type="button" disabled>
+              <i data-lucide="square"></i>
+              <span>Cancel</span>
+            </button>
+          </div>
+          <div id="transcribe-progress" class="progress-track" hidden>
+            <span id="transcribe-progress-fill"></span>
+          </div>
+          <p id="transcribe-progress-detail" class="field-note"></p>
+          <p id="transcribe-output-path" class="output-path"></p>
         </section>
       </div>
 
@@ -371,6 +546,8 @@ app.innerHTML = `
 
 createIcons({
   icons: {
+    ArrowRightLeft,
+    Captions,
     CheckCircle2,
     Circle,
     FileText,
@@ -386,42 +563,95 @@ createIcons({
   },
 });
 
-const dialogueTab = document.querySelector<HTMLButtonElement>("#dialogue-tab")!;
-const processingTab = document.querySelector<HTMLButtonElement>("#processing-tab")!;
-const grabberTab = document.querySelector<HTMLButtonElement>("#grabber-tab")!;
-const dialoguePanel = document.querySelector<HTMLElement>("#dialogue-panel")!;
-const processingPanel = document.querySelector<HTMLElement>("#processing-panel")!;
-const grabberPanel = document.querySelector<HTMLElement>("#grabber-panel")!;
-const dialogueVideoPath = document.querySelector<HTMLInputElement>("#dialogue-video-path")!;
-const processingVideoPath = document.querySelector<HTMLInputElement>("#processing-video-path")!;
-const grabUrl = document.querySelector<HTMLInputElement>("#grab-url")!;
-const grabOutputDir = document.querySelector<HTMLInputElement>("#grab-output-dir")!;
-const dialogueBrowseButton = document.querySelector<HTMLButtonElement>("#dialogue-browse-button")!;
-const processingBrowseButton = document.querySelector<HTMLButtonElement>("#processing-browse-button")!;
-const grabOutputBrowseButton = document.querySelector<HTMLButtonElement>(
-  "#grab-output-browse-button",
-)!;
-const dialogueStartButton = document.querySelector<HTMLButtonElement>("#dialogue-start-button")!;
-const processingStartButton = document.querySelector<HTMLButtonElement>("#processing-start-button")!;
-const grabberStartButton = document.querySelector<HTMLButtonElement>("#grabber-start-button")!;
-const grabberActionLabel = document.querySelector<HTMLElement>("#grabber-action-label")!;
-const materialRefreshButton = document.querySelector<HTMLButtonElement>("#material-refresh-button")!;
-const dialogueStopButton = document.querySelector<HTMLButtonElement>("#dialogue-stop-button")!;
-const processingStopButton = document.querySelector<HTMLButtonElement>("#processing-stop-button")!;
-const grabberStopButton = document.querySelector<HTMLButtonElement>("#grabber-stop-button")!;
-const forceTranscribe = document.querySelector<HTMLInputElement>("#force-transcribe")!;
+function byId<T extends HTMLElement>(id: string): T {
+  return document.querySelector<T>(`#${id}`)!;
+}
+
+const workflowTabs: Record<Workflow, HTMLButtonElement> = {
+  dialogue: byId("dialogue-tab"),
+  processing: byId("processing-tab"),
+  converter: byId("converter-tab"),
+  transcribe: byId("transcribe-tab"),
+  grabber: byId("grabber-tab"),
+};
+const workflowPanels: Record<Workflow, HTMLElement> = {
+  dialogue: byId("dialogue-panel"),
+  processing: byId("processing-panel"),
+  converter: byId("converter-panel"),
+  transcribe: byId("transcribe-panel"),
+  grabber: byId("grabber-panel"),
+};
+const workflowRunMessages: Record<Workflow, HTMLElement> = {
+  dialogue: byId("dialogue-run-message"),
+  processing: byId("processing-run-message"),
+  converter: byId("converter-run-message"),
+  transcribe: byId("transcribe-run-message"),
+  grabber: byId("grabber-run-message"),
+};
+const workflowOutputPaths: Record<Workflow, HTMLElement> = {
+  dialogue: byId("dialogue-output-path"),
+  processing: byId("processing-output-path"),
+  converter: byId("converter-output-path"),
+  transcribe: byId("transcribe-output-path"),
+  grabber: byId("grabber-output-path"),
+};
+
+const dialogueVideoPath = byId<HTMLInputElement>("dialogue-video-path");
+const processingVideoPath = byId<HTMLInputElement>("processing-video-path");
+const converterVideoPath = byId<HTMLInputElement>("converter-video-path");
+const transcribeVideoPath = byId<HTMLInputElement>("transcribe-video-path");
+const grabUrl = byId<HTMLInputElement>("grab-url");
+const grabOutputDir = byId<HTMLInputElement>("grab-output-dir");
+const dialogueBrowseButton = byId<HTMLButtonElement>("dialogue-browse-button");
+const processingBrowseButton = byId<HTMLButtonElement>("processing-browse-button");
+const converterBrowseButton = byId<HTMLButtonElement>("converter-browse-button");
+const transcribeBrowseButton = byId<HTMLButtonElement>("transcribe-browse-button");
+const grabOutputBrowseButton = byId<HTMLButtonElement>("grab-output-browse-button");
+const dialogueStartButton = byId<HTMLButtonElement>("dialogue-start-button");
+const processingStartButton = byId<HTMLButtonElement>("processing-start-button");
+const converterStartButton = byId<HTMLButtonElement>("converter-start-button");
+const transcribeStartButton = byId<HTMLButtonElement>("transcribe-start-button");
+const grabberStartButton = byId<HTMLButtonElement>("grabber-start-button");
+const grabberActionLabel = byId<HTMLElement>("grabber-action-label");
+const materialRefreshButton = byId<HTMLButtonElement>("material-refresh-button");
+const dialogueStopButton = byId<HTMLButtonElement>("dialogue-stop-button");
+const processingStopButton = byId<HTMLButtonElement>("processing-stop-button");
+const converterStopButton = byId<HTMLButtonElement>("converter-stop-button");
+const transcribeStopButton = byId<HTMLButtonElement>("transcribe-stop-button");
+const grabberStopButton = byId<HTMLButtonElement>("grabber-stop-button");
+const forceTranscribe = byId<HTMLInputElement>("force-transcribe");
+const transcribeLanguage = byId<HTMLSelectElement>("transcribe-language");
+const converterModeNote = byId<HTMLElement>("converter-mode-note");
+type ProgressElements = {
+  track: HTMLElement;
+  fill: HTMLElement;
+  detail: HTMLElement;
+};
+
+// Workflows whose backend reports ffmpeg progress.
+const workflowProgress: Partial<Record<Workflow, ProgressElements>> = {
+  processing: {
+    track: byId("processing-progress"),
+    fill: byId("processing-progress-fill"),
+    detail: byId("processing-progress-detail"),
+  },
+  converter: {
+    track: byId("converter-progress"),
+    fill: byId("converter-progress-fill"),
+    detail: byId("converter-progress-detail"),
+  },
+  transcribe: {
+    track: byId("transcribe-progress"),
+    fill: byId("transcribe-progress-fill"),
+    detail: byId("transcribe-progress-detail"),
+  },
+};
 const grabberMetadataSection = document.querySelector<HTMLElement>("#grabber-metadata-section")!;
 const grabberTitle = document.querySelector<HTMLElement>("#grabber-title")!;
 const grabberMetaLine = document.querySelector<HTMLElement>("#grabber-meta-line")!;
 const grabQuality = document.querySelector<HTMLSelectElement>("#grab-quality")!;
 const grabSubtitleOptions = document.querySelector<HTMLElement>("#grab-subtitle-options")!;
 const statusChip = document.querySelector<HTMLElement>("#status-chip")!;
-const dialogueRunMessage = document.querySelector<HTMLElement>("#dialogue-run-message")!;
-const processingRunMessage = document.querySelector<HTMLElement>("#processing-run-message")!;
-const grabberRunMessage = document.querySelector<HTMLElement>("#grabber-run-message")!;
-const dialogueOutputPath = document.querySelector<HTMLElement>("#dialogue-output-path")!;
-const processingOutputPath = document.querySelector<HTMLElement>("#processing-output-path")!;
-const grabberOutputPath = document.querySelector<HTMLElement>("#grabber-output-path")!;
 const materialGallery = document.querySelector<HTMLElement>("#material-gallery")!;
 const logOutput = document.querySelector<HTMLElement>("#log-output")!;
 const phaseList = document.querySelector<HTMLOListElement>("#phase-list")!;
@@ -429,7 +659,18 @@ const runtimeChip = document.querySelector<HTMLElement>("#runtime-chip")!;
 const runtimeMessage = document.querySelector<HTMLElement>("#runtime-message")!;
 const slowSpeed = document.querySelector<HTMLInputElement>("#slow-speed")!;
 const slowSpeedRange = document.querySelector<HTMLInputElement>("#slow-speed-range")!;
-const presetButtons = Array.from(document.querySelectorAll<HTMLButtonElement>(".preset-button"));
+const presetButtons = Array.from(
+  document.querySelectorAll<HTMLButtonElement>("#processing-panel .preset-button"),
+);
+const convertModeButtons = Array.from(
+  document.querySelectorAll<HTMLButtonElement>(".convert-mode-button"),
+);
+
+const convertModeNotes: Record<string, string> = {
+  reencode: "Most compatible for editing. Re-encodes everything, so it takes a while.",
+  remux: "Copies the video stream into MP4 and converts audio to AAC. Fast, but editors may struggle with HEVC/AV1 sources.",
+};
+let convertMode = "reencode";
 
 function numberValue(id: string): number {
   return Number(document.querySelector<HTMLInputElement>(`#${id}`)!.value);
@@ -465,23 +706,29 @@ function renderPhases() {
 
 function setActiveWorkflow(workflow: Workflow) {
   activeWorkflow = workflow;
-  dialogueTab.classList.toggle("active", workflow === "dialogue");
-  processingTab.classList.toggle("active", workflow === "processing");
-  grabberTab.classList.toggle("active", workflow === "grabber");
-  dialoguePanel.classList.toggle("active", workflow === "dialogue");
-  processingPanel.classList.toggle("active", workflow === "processing");
-  grabberPanel.classList.toggle("active", workflow === "grabber");
+  for (const [name, tab] of Object.entries(workflowTabs)) {
+    tab.classList.toggle("active", name === workflow);
+  }
+  for (const [name, panel] of Object.entries(workflowPanels)) {
+    panel.classList.toggle("active", name === workflow);
+  }
   renderPhases();
 }
 
 function setRunControls(running: boolean) {
   dialogueStartButton.disabled = running;
   processingStartButton.disabled = running;
+  converterStartButton.disabled = running;
+  transcribeStartButton.disabled = running;
   dialogueStopButton.disabled = !running;
   processingStopButton.disabled = !running;
+  converterStopButton.disabled = !running;
+  transcribeStopButton.disabled = !running;
   grabberStopButton.disabled = !running;
   dialogueBrowseButton.disabled = running;
   processingBrowseButton.disabled = running;
+  converterBrowseButton.disabled = running;
+  transcribeBrowseButton.disabled = running;
   grabOutputBrowseButton.disabled = running;
   materialRefreshButton.disabled = running;
   applyGrabControlState(running);
@@ -505,20 +752,13 @@ function setStatus(status: ConversionStatus) {
           ? "Running"
           : "Ready";
 
-  const runMessage =
-    workflow === "dialogue"
-      ? dialogueRunMessage
-      : workflow === "processing"
-        ? processingRunMessage
-        : grabberRunMessage;
-  const outputPath =
-    workflow === "dialogue"
-      ? dialogueOutputPath
-      : workflow === "processing"
-        ? processingOutputPath
-        : grabberOutputPath;
+  const runMessage = workflowRunMessages[workflow];
+  const outputPath = workflowOutputPaths[workflow];
   runMessage.textContent = status.message;
   outputPath.textContent = status.outputPath ?? (workflow === "grabber" ? grabOutputDir.value.trim() : "");
+  if (!running) {
+    resetRunProgress();
+  }
   setRunControls(running);
   renderPhases();
   if (workflow === "grabber" && status.status === "complete" && status.message === "Material is ready") {
@@ -527,6 +767,26 @@ function setStatus(status: ConversionStatus) {
   if (!running) {
     runningWorkflow = null;
   }
+}
+
+function resetRunProgress() {
+  for (const elements of Object.values(workflowProgress)) {
+    elements.track.hidden = true;
+    elements.fill.style.width = "0%";
+    elements.detail.textContent = "";
+  }
+}
+
+function updateRunProgress(progress: ConversionProgress) {
+  const elements = workflowProgress[workflowForStatus()];
+  if (!elements) {
+    return;
+  }
+  elements.track.hidden = false;
+  if (typeof progress.percent === "number") {
+    elements.fill.style.width = `${progress.percent.toFixed(1)}%`;
+  }
+  elements.detail.textContent = progress.detail;
 }
 
 function appendLog(entry: ConversionLog) {
@@ -546,7 +806,7 @@ function setRuntimeStatus(status: RuntimeStatus) {
 
 function setGrabOutputDir(path: string) {
   grabOutputDir.value = path;
-  grabberOutputPath.textContent = path;
+  workflowOutputPaths.grabber.textContent = path;
   applyGrabControlState();
   if (activeWorkflow === "processing") {
     void loadMaterialGallery();
@@ -776,12 +1036,27 @@ function updateSpeed(value: string) {
   });
 }
 
-async function chooseVideo(target: HTMLInputElement, workflow: Workflow, defaultPath?: string) {
+const videoExtensions = ["mkv", "mp4", "mov", "m4v", "webm"];
+const audioExtensions = ["mp3", "m4a", "wav", "aac", "flac", "ogg"];
+
+const workflowReadyMessages: Partial<Record<Workflow, string>> = {
+  dialogue: "Ready to convert",
+  processing: "Ready to transcode",
+  converter: "Ready to convert",
+  transcribe: "Ready to transcribe",
+};
+
+async function chooseVideo(
+  target: HTMLInputElement,
+  workflow: Workflow,
+  defaultPath?: string,
+  extensions: string[] = videoExtensions,
+) {
   const selected = await open({
     multiple: false,
     directory: false,
     defaultPath: defaultPath || undefined,
-    filters: [{ name: "Video", extensions: ["mkv", "mp4", "mov", "m4v", "webm"] }],
+    filters: [{ name: "Media", extensions }],
   });
   if (typeof selected === "string") {
     target.value = selected;
@@ -790,7 +1065,7 @@ async function chooseVideo(target: HTMLInputElement, workflow: Workflow, default
     setStatus({
       status: "idle",
       phase: "inspect",
-      message: workflow === "dialogue" ? "Ready to convert" : "Ready to transcode",
+      message: workflowReadyMessages[workflow] ?? "Ready",
     });
   }
 }
@@ -812,19 +1087,28 @@ async function chooseDirectory() {
   }
 }
 
-dialogueTab.addEventListener("click", () => setActiveWorkflow("dialogue"));
-processingTab.addEventListener("click", () => {
+workflowTabs.dialogue.addEventListener("click", () => setActiveWorkflow("dialogue"));
+workflowTabs.processing.addEventListener("click", () => {
   setActiveWorkflow("processing");
   void loadMaterialGallery();
 });
-grabberTab.addEventListener("click", () => setActiveWorkflow("grabber"));
+workflowTabs.converter.addEventListener("click", () => setActiveWorkflow("converter"));
+workflowTabs.transcribe.addEventListener("click", () => setActiveWorkflow("transcribe"));
+workflowTabs.grabber.addEventListener("click", () => setActiveWorkflow("grabber"));
 dialogueBrowseButton.addEventListener("click", () => chooseVideo(dialogueVideoPath, "dialogue"));
 processingBrowseButton.addEventListener("click", () =>
   chooseVideo(processingVideoPath, "processing", grabOutputDir.value.trim()),
 );
+converterBrowseButton.addEventListener("click", () => chooseVideo(converterVideoPath, "converter"));
+transcribeBrowseButton.addEventListener("click", () =>
+  chooseVideo(transcribeVideoPath, "transcribe", undefined, [
+    ...videoExtensions,
+    ...audioExtensions,
+  ]),
+);
 grabOutputBrowseButton.addEventListener("click", () => chooseDirectory());
 grabOutputDir.addEventListener("input", () => {
-  grabberOutputPath.textContent = grabOutputDir.value.trim();
+  workflowOutputPaths.grabber.textContent = grabOutputDir.value.trim();
   applyGrabControlState();
 });
 grabOutputDir.addEventListener("change", () => void loadMaterialGallery());
@@ -845,44 +1129,27 @@ presetButtons.forEach((button) => {
   button.addEventListener("click", () => updateSpeed(button.dataset.speed ?? "0.50"));
 });
 
-dialogueStartButton.addEventListener("click", async () => {
-  setActiveWorkflow("dialogue");
-  runningWorkflow = "dialogue";
-  logOutput.textContent = "";
-  try {
-    const expectedOutput = await invoke<string>("start_conversion", {
-      options: {
-        videoPath: dialogueVideoPath.value.trim(),
-        forceTranscribe: forceTranscribe.checked,
-        prePad: numberValue("pre-pad"),
-        postPad: numberValue("post-pad"),
-        mergeGap: numberValue("merge-gap"),
-        keepCueClasses: "dialogue",
-        keepSources: "dialogue,mixed",
-      },
-    });
-    dialogueOutputPath.textContent = expectedOutput;
-  } catch (error) {
-    setStatus({
-      status: "error",
-      phase: "error",
-      message: String(error),
-    });
-  }
+function updateConvertMode(mode: string) {
+  convertMode = mode;
+  convertModeButtons.forEach((button) => {
+    button.classList.toggle("active", button.dataset.mode === mode);
+  });
+  converterModeNote.textContent = convertModeNotes[mode] ?? "";
+}
+
+convertModeButtons.forEach((button) => {
+  button.addEventListener("click", () => updateConvertMode(button.dataset.mode ?? "reencode"));
 });
 
-processingStartButton.addEventListener("click", async () => {
-  setActiveWorkflow("processing");
-  runningWorkflow = "processing";
+// Shared lifecycle for every start button: focus the workflow, clear the log,
+// invoke the backend command, and show its expected output path (or the error).
+async function startRun(workflow: Workflow, command: string, options: Record<string, unknown>) {
+  setActiveWorkflow(workflow);
+  runningWorkflow = workflow;
   logOutput.textContent = "";
   try {
-    const expectedOutput = await invoke<string>("start_slowdown", {
-      options: {
-        videoPath: processingVideoPath.value.trim(),
-        speed: Number(slowSpeed.value),
-      },
-    });
-    processingOutputPath.textContent = expectedOutput;
+    const expectedOutput = await invoke<string>(command, { options });
+    workflowOutputPaths[workflow].textContent = expectedOutput;
   } catch (error) {
     setStatus({
       status: "error",
@@ -890,7 +1157,49 @@ processingStartButton.addEventListener("click", async () => {
       message: String(error),
     });
   }
-});
+}
+
+dialogueStartButton.addEventListener("click", () =>
+  startRun("dialogue", "start_conversion", {
+    videoPath: dialogueVideoPath.value.trim(),
+    forceTranscribe: forceTranscribe.checked,
+    prePad: numberValue("pre-pad"),
+    postPad: numberValue("post-pad"),
+    mergeGap: numberValue("merge-gap"),
+    keepCueClasses: "dialogue",
+    keepSources: "dialogue,mixed",
+  }),
+);
+
+processingStartButton.addEventListener("click", () =>
+  startRun("processing", "start_slowdown", {
+    videoPath: processingVideoPath.value.trim(),
+    speed: Number(slowSpeed.value),
+  }),
+);
+
+converterStartButton.addEventListener("click", () =>
+  startRun("converter", "start_convert", {
+    videoPath: converterVideoPath.value.trim(),
+    mode: convertMode,
+  }),
+);
+
+function selectedTranscribeFormats(): string[] {
+  return Array.from(
+    document.querySelectorAll<HTMLInputElement>(".transcribe-format:checked"),
+  )
+    .map((input) => input.dataset.format ?? "")
+    .filter(Boolean);
+}
+
+transcribeStartButton.addEventListener("click", () =>
+  startRun("transcribe", "start_transcribe", {
+    videoPath: transcribeVideoPath.value.trim(),
+    language: transcribeLanguage.value,
+    formats: selectedTranscribeFormats(),
+  }),
+);
 
 async function inspectGrabUrl() {
   setActiveWorkflow("grabber");
@@ -939,7 +1248,7 @@ async function downloadGrabSelection() {
         subtitleLanguages: subtitleLanguages.join(","),
       },
     });
-    grabberOutputPath.textContent = outputDir;
+    workflowOutputPaths.grabber.textContent = outputDir;
   } catch (error) {
     setStatus({
       status: "error",
@@ -968,14 +1277,20 @@ async function stopCurrentRun() {
 
 dialogueStopButton.addEventListener("click", stopCurrentRun);
 processingStopButton.addEventListener("click", stopCurrentRun);
+converterStopButton.addEventListener("click", stopCurrentRun);
+transcribeStopButton.addEventListener("click", stopCurrentRun);
 grabberStopButton.addEventListener("click", stopCurrentRun);
 
 listen<ConversionLog>("conversion-log", ({ payload }) => appendLog(payload));
+listen<ConversionProgress>("conversion-progress", ({ payload }) =>
+  updateRunProgress(payload),
+);
 listen<ConversionStatus>("conversion-state", ({ payload }) => setStatus(payload));
 listen<RuntimeStatus>("runtime-state", ({ payload }) => setRuntimeStatus(payload));
 setActiveWorkflow(activeWorkflow);
 setStatus(currentStatus);
 updateSpeed(slowSpeed.value);
+updateConvertMode(convertMode);
 invoke<string>("get_default_grab_output_dir")
   .then((path) => {
     if (!grabOutputDir.value.trim()) {
