@@ -1558,12 +1558,34 @@ function parseSubtitles(content: string): SubtitleCue[] {
 // dialogue-only skipping, and the runtime estimate stay honest.
 const MAX_CUE_SECONDS = 12;
 
+// Non-speech annotations: Whisper hallucinates broadcast-subtitle credits
+// ("Musik", "Untertitel im Auftrag des ZDF", "Copyright WDR"), and SDH
+// tracks describe sounds in brackets or asterisks ("*Spannende Musik*").
+function isNonSpeechCue(text: string): boolean {
+  const trimmed = text.trim();
+  if (!/[\p{L}\p{N}]/u.test(trimmed)) {
+    return true;
+  }
+  if (/^[(\[*♪♫].*[)\]*♪♫]$/u.test(trimmed)) {
+    return true;
+  }
+  const words = trimmed
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+  return (
+    /^(\p{L}+ )?musik$/u.test(words) ||
+    words.startsWith("untertitel") ||
+    words.startsWith("copyright")
+  );
+}
+
 function cleanCues(cues: SubtitleCue[]): SubtitleCue[] {
   const cleaned: SubtitleCue[] = [];
   playerDroppedCues = 0;
   playerClampedCues = 0;
   for (const cue of cues) {
-    if (!/[\p{L}\p{N}]/u.test(cue.text)) {
+    if (isNonSpeechCue(cue.text)) {
       playerDroppedCues += 1;
       continue;
     }
