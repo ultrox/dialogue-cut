@@ -543,17 +543,6 @@ input:focus {
   gap: 8px;
 }
 
-.player-source-panel {
-  padding: 22px;
-  border-bottom: 1px solid #ced7d1;
-  display: grid;
-  gap: 8px;
-}
-
-.player-source-panel .eyebrow {
-  margin-bottom: 4px;
-}
-
 .subtitle-row {
   margin-top: 8px;
 }
