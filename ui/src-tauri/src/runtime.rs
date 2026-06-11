@@ -465,6 +465,16 @@ pub(crate) fn ensure_private_download_tools(
     }
 }
 
+/// Resolves the same paths as processor_paths, but never installs anything.
+/// For read-only checks like listing downloaded models.
+pub(crate) fn probe_processor_paths(app: &AppHandle) -> Result<ProcessorPaths, String> {
+    let local = local_processor_paths();
+    if cfg!(debug_assertions) && local_runtime_ready(&local) {
+        return Ok(local);
+    }
+    private_processor_paths(app)
+}
+
 pub(crate) fn processor_paths(
     app: &AppHandle,
     state: &ConversionState,

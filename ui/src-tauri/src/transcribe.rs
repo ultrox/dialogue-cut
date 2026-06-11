@@ -1,28 +1,201 @@
 //! Transcription workflow: extract audio, run MLX Whisper, and write
 //! subtitles (.srt/.vtt) plus a raw transcript (.txt) beside the source.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    thread,
+    time::Duration,
 };
 use tauri::AppHandle;
 
 use crate::events::{emit_log, emit_progress, emit_status};
 use crate::media::{Ffmpeg, MediaProbe};
 use crate::process::{format_clock, run_logged_command_observed, ConversionState};
-use crate::runtime::{prepend_runtime_path, processor_paths, ProcessorPaths};
+use crate::runtime::{
+    prepend_runtime_path, probe_processor_paths, processor_paths, ProcessorPaths,
+};
 
-const WHISPER_MODEL: &str = "mlx-community/whisper-small-mlx";
 const SUPPORTED_FORMATS: [&str; 5] = ["srt", "vtt", "txt", "tsv", "json"];
+
+// (HF repo id, label, approximate download size in MB). Sizes are only used
+// for download progress estimates and the size hint in the picker.
+const WHISPER_MODELS: &[(&str, &str, u64)] = &[
+    ("mlx-community/whisper-tiny", "Tiny — fastest, rough", 80),
+    ("mlx-community/whisper-small-mlx", "Small — balanced", 480),
+    ("mlx-community/whisper-medium", "Medium — high accuracy", 1500),
+    (
+        "mlx-community/whisper-large-v3-turbo",
+        "Large v3 Turbo — best quality",
+        1700,
+    ),
+];
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TranscribeOptions {
     pub(crate) video_path: String,
     pub(crate) language: String,
+    pub(crate) model: String,
     pub(crate) formats: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ModelDownloadOptions {
+    pub(crate) model: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WhisperModelInfo {
+    id: String,
+    label: String,
+    size_mb: u64,
+    downloaded: bool,
+}
+
+fn model_entry(id: &str) -> Result<&'static (&'static str, &'static str, u64), String> {
+    WHISPER_MODELS
+        .iter()
+        .find(|(model_id, _, _)| *model_id == id)
+        .ok_or_else(|| format!("Unknown Whisper model: {id}."))
+}
+
+pub(crate) fn model_cache_dir(hf_home: &Path, id: &str) -> PathBuf {
+    hf_home
+        .join("hub")
+        .join(format!("models--{}", id.replace('/', "--")))
+}
+
+// A model counts as downloaded when a snapshot contains a resolvable weights
+// file. Hub snapshots are symlinks into blobs/, and the symlink only resolves
+// once the blob finished downloading.
+fn model_downloaded(hf_home: &Path, id: &str) -> bool {
+    let snapshots = model_cache_dir(hf_home, id).join("snapshots");
+    let Ok(revisions) = fs::read_dir(snapshots) else {
+        return false;
+    };
+    revisions
+        .filter_map(Result::ok)
+        .flat_map(|revision| fs::read_dir(revision.path()).into_iter().flatten())
+        .filter_map(Result::ok)
+        .any(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            (name.ends_with(".npz") || name.ends_with(".safetensors")) && entry.path().exists()
+        })
+}
+
+pub(crate) fn list_models(app: &AppHandle) -> Result<Vec<WhisperModelInfo>, String> {
+    let hf_home = probe_processor_paths(app)?.hf_home;
+    Ok(WHISPER_MODELS
+        .iter()
+        .map(|(id, label, size_mb)| WhisperModelInfo {
+            id: (*id).into(),
+            label: (*label).into(),
+            size_mb: *size_mb,
+            downloaded: model_downloaded(&hf_home, id),
+        })
+        .collect())
+}
+
+pub(crate) fn validated_model(id: &str) -> Result<String, String> {
+    model_entry(id).map(|(model_id, _, _)| (*model_id).to_string())
+}
+
+fn dir_size(path: &Path) -> u64 {
+    let Ok(entries) = fs::read_dir(path) else {
+        return 0;
+    };
+    entries
+        .filter_map(Result::ok)
+        .map(|entry| {
+            let path = entry.path();
+            let Ok(metadata) = fs::symlink_metadata(&path) else {
+                return 0;
+            };
+            if metadata.is_dir() {
+                dir_size(&path)
+            } else if metadata.is_file() {
+                metadata.len()
+            } else {
+                0
+            }
+        })
+        .sum()
+}
+
+pub(crate) fn run_model_download(
+    app: &AppHandle,
+    state: &ConversionState,
+    model_id: &str,
+) -> Result<(), String> {
+    let (id, _, size_mb) = *model_entry(model_id)?;
+    let paths = processor_paths(app, state)?;
+    if model_downloaded(&paths.hf_home, id) {
+        return Ok(());
+    }
+
+    emit_status(
+        app,
+        "running",
+        "setup",
+        "Downloading the Whisper model",
+        None,
+    );
+
+    // huggingface_hub reports its progress with carriage returns that never
+    // reach a line-based reader, so estimate progress from the on-disk size
+    // of the model's cache directory instead.
+    let cache_dir = model_cache_dir(&paths.hf_home, id);
+    let stop_polling = Arc::new(AtomicBool::new(false));
+    let poller = {
+        let stop_polling = Arc::clone(&stop_polling);
+        let app = app.clone();
+        let cache_dir = cache_dir.clone();
+        thread::spawn(move || {
+            while !stop_polling.load(Ordering::SeqCst) {
+                let downloaded_mb = dir_size(&cache_dir) / (1024 * 1024);
+                let percent =
+                    ((downloaded_mb as f64 / size_mb as f64) * 100.0).clamp(0.0, 99.0);
+                emit_progress(
+                    &app,
+                    Some(percent),
+                    format!("{downloaded_mb} MB of ~{size_mb} MB"),
+                );
+                thread::sleep(Duration::from_secs(1));
+            }
+        })
+    };
+
+    let mut command = Command::new(&paths.python);
+    command
+        .args([
+            "-c",
+            "import sys\nfrom huggingface_hub import snapshot_download\nsnapshot_download(repo_id=sys.argv[1])\nprint('Model download complete:', sys.argv[1])",
+        ])
+        .arg(id)
+        .env("HF_HUB_DISABLE_PROGRESS_BARS", "1");
+    prepend_runtime_path(&mut command, &paths);
+    let result = run_logged_command_observed(app, state, &mut command, |_, _| {});
+
+    stop_polling.store(true, Ordering::SeqCst);
+    let _ = poller.join();
+    result?;
+
+    if model_downloaded(&paths.hf_home, id) {
+        emit_progress(app, Some(100.0), "Model downloaded");
+        Ok(())
+    } else {
+        Err("The model download did not complete.".into())
+    }
 }
 
 /// Validates and dedupes the requested output formats, preserving order.
@@ -120,6 +293,7 @@ pub(crate) fn run_transcribe(
     fs::create_dir_all(&work_dir)
         .map_err(|error| format!("Could not create {}: {error}", work_dir.display()))?;
 
+    let model = validated_model(&options.model)?;
     let result = run_transcribe_steps(
         app,
         state,
@@ -129,6 +303,7 @@ pub(crate) fn run_transcribe(
         &output_dir,
         base_name,
         &options.language,
+        &model,
         &formats,
     );
     let _ = fs::remove_dir_all(&work_dir);
@@ -145,6 +320,7 @@ fn run_transcribe_steps(
     output_dir: &Path,
     base_name: &str,
     language: &str,
+    model: &str,
     formats: &[String],
 ) -> Result<(), String> {
     let audio_path = work_dir.join("audio.wav");
@@ -183,7 +359,7 @@ fn run_transcribe_steps(
     let mut command = Command::new(paths.venv_dir.join("bin/mlx_whisper"));
     command
         .arg(&audio_path)
-        .args(["--model", WHISPER_MODEL])
+        .args(["--model", model])
         .args(["--output-format", "all"])
         .arg("--output-dir")
         .arg(work_dir)

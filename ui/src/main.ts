@@ -38,6 +38,13 @@ type ConversionProgress = {
   detail: string;
 };
 
+type WhisperModel = {
+  id: string;
+  label: string;
+  sizeMb: number;
+  downloaded: boolean;
+};
+
 type RuntimeStatus = {
   ready: boolean;
   message: string;
@@ -401,14 +408,24 @@ app.innerHTML = `
             <i data-lucide="settings-2"></i>
           </div>
           <div class="metadata-grid">
-            <label>
-              <span>Spoken language</span>
-              <select id="transcribe-language">
-                <option value="de" selected>German</option>
-                <option value="en">English</option>
-                <option value="auto">Detect automatically</option>
-              </select>
-            </label>
+            <div class="stacked-fields">
+              <label>
+                <span>Spoken language</span>
+                <select id="transcribe-language">
+                  <option value="de" selected>German</option>
+                  <option value="en">English</option>
+                  <option value="auto">Detect automatically</option>
+                </select>
+              </label>
+              <div>
+                <span class="field-label">Whisper model</span>
+                <select id="transcribe-model"></select>
+                <button id="transcribe-model-download" class="secondary-button model-download-button" type="button" hidden>
+                  <i data-lucide="hard-drive-download"></i>
+                  <span>Download model</span>
+                </button>
+              </div>
+            </div>
             <div>
               <span class="field-label">Output files</span>
               <div class="subtitle-options">
@@ -621,6 +638,8 @@ const transcribeStopButton = byId<HTMLButtonElement>("transcribe-stop-button");
 const grabberStopButton = byId<HTMLButtonElement>("grabber-stop-button");
 const forceTranscribe = byId<HTMLInputElement>("force-transcribe");
 const transcribeLanguage = byId<HTMLSelectElement>("transcribe-language");
+const transcribeModel = byId<HTMLSelectElement>("transcribe-model");
+const transcribeModelDownloadButton = byId<HTMLButtonElement>("transcribe-model-download");
 const converterModeNote = byId<HTMLElement>("converter-mode-note");
 type ProgressElements = {
   track: HTMLElement;
@@ -732,6 +751,7 @@ function setRunControls(running: boolean) {
   grabOutputBrowseButton.disabled = running;
   materialRefreshButton.disabled = running;
   applyGrabControlState(running);
+  updateTranscribeModelControls(running);
 }
 
 function workflowForStatus(): Workflow {
@@ -763,6 +783,9 @@ function setStatus(status: ConversionStatus) {
   renderPhases();
   if (workflow === "grabber" && status.status === "complete" && status.message === "Material is ready") {
     void loadMaterialGallery();
+  }
+  if (workflow === "transcribe" && status.status === "complete" && status.message === "Whisper model is ready") {
+    void loadWhisperModels();
   }
   if (!running) {
     runningWorkflow = null;
@@ -1185,6 +1208,56 @@ converterStartButton.addEventListener("click", () =>
   }),
 );
 
+let whisperModels: WhisperModel[] = [];
+
+function formatModelSize(sizeMb: number): string {
+  return sizeMb >= 1000 ? `${(sizeMb / 1000).toFixed(1)} GB` : `${sizeMb} MB`;
+}
+
+function selectedWhisperModel(): WhisperModel | undefined {
+  return whisperModels.find((model) => model.id === transcribeModel.value);
+}
+
+function updateTranscribeModelControls(running = currentStatus.status === "running") {
+  const model = selectedWhisperModel();
+  const needsDownload = model !== undefined && !model.downloaded;
+  transcribeModelDownloadButton.hidden = !needsDownload;
+  transcribeModelDownloadButton.disabled = running;
+  transcribeModel.disabled = running;
+  transcribeStartButton.disabled = running || needsDownload;
+}
+
+function renderWhisperModels() {
+  const previous = transcribeModel.value;
+  transcribeModel.replaceChildren(
+    ...whisperModels.map((model) => {
+      const option = document.createElement("option");
+      option.value = model.id;
+      option.textContent = model.downloaded
+        ? `${model.label} — installed`
+        : `${model.label} — ${formatModelSize(model.sizeMb)} download`;
+      return option;
+    }),
+  );
+  const fallback =
+    whisperModels.find((model) => model.id === previous) ??
+    whisperModels.find((model) => model.id.includes("whisper-small")) ??
+    whisperModels.find((model) => model.downloaded);
+  if (fallback) {
+    transcribeModel.value = fallback.id;
+  }
+  updateTranscribeModelControls();
+}
+
+async function loadWhisperModels() {
+  try {
+    whisperModels = await invoke<WhisperModel[]>("list_whisper_models");
+    renderWhisperModels();
+  } catch (error) {
+    appendLog({ stream: "stderr", line: String(error) });
+  }
+}
+
 function selectedTranscribeFormats(): string[] {
   return Array.from(
     document.querySelectorAll<HTMLInputElement>(".transcribe-format:checked"),
@@ -1197,7 +1270,15 @@ transcribeStartButton.addEventListener("click", () =>
   startRun("transcribe", "start_transcribe", {
     videoPath: transcribeVideoPath.value.trim(),
     language: transcribeLanguage.value,
+    model: transcribeModel.value,
     formats: selectedTranscribeFormats(),
+  }),
+);
+
+transcribeModel.addEventListener("change", () => updateTranscribeModelControls());
+transcribeModelDownloadButton.addEventListener("click", () =>
+  startRun("transcribe", "start_model_download", {
+    model: transcribeModel.value,
   }),
 );
 
@@ -1291,6 +1372,7 @@ setActiveWorkflow(activeWorkflow);
 setStatus(currentStatus);
 updateSpeed(slowSpeed.value);
 updateConvertMode(convertMode);
+void loadWhisperModels();
 invoke<string>("get_default_grab_output_dir")
   .then((path) => {
     if (!grabOutputDir.value.trim()) {

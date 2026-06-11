@@ -530,6 +530,17 @@ input:focus {
   font-size: 12px;
 }
 
+.stacked-fields {
+  display: grid;
+  gap: 14px;
+  align-content: start;
+}
+
+.model-download-button {
+  width: 100%;
+  margin-top: 8px;
+}
+
 .progress-track {
   margin-top: 14px;
   height: 8px;

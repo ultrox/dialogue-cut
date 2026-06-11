@@ -35,7 +35,12 @@ use process::{
 };
 use runtime::runtime_status_inner;
 use slowdown::{output_path_for_slowdown, run_slowdown, SlowdownOptions};
-use transcribe::{normalized_formats, run_transcribe, transcript_base_name, TranscribeOptions};
+use runtime::probe_processor_paths;
+use transcribe::{
+    list_models, model_cache_dir, normalized_formats, run_model_download, run_transcribe,
+    transcript_base_name, validated_model, ModelDownloadOptions, TranscribeOptions,
+    WhisperModelInfo,
+};
 
 #[tauri::command]
 fn get_runtime_status(app: AppHandle) -> RuntimeStatus {
@@ -115,6 +120,29 @@ fn start_transcribe(
         "Transcription files are ready",
         output_path,
         move |app, state| run_transcribe(app, state, &options, &base_name),
+    )
+}
+
+#[tauri::command]
+fn list_whisper_models(app: AppHandle) -> Result<Vec<WhisperModelInfo>, String> {
+    list_models(&app)
+}
+
+#[tauri::command]
+fn start_model_download(
+    app: AppHandle,
+    state: State<'_, ConversionState>,
+    options: ModelDownloadOptions,
+) -> Result<String, String> {
+    let model = validated_model(&options.model)?;
+    let output_path = model_cache_dir(&probe_processor_paths(&app)?.hf_home, &model);
+    start_background_job(
+        app,
+        &state,
+        "Checking the private runtime",
+        "Whisper model is ready",
+        output_path,
+        move |app, state| run_model_download(app, state, &model),
     )
 }
 
@@ -235,6 +263,8 @@ pub fn run() {
             start_slowdown,
             start_convert,
             start_transcribe,
+            list_whisper_models,
+            start_model_download,
             probe_grab,
             start_grab,
             stop_conversion
