@@ -68,6 +68,12 @@ struct RenderSubtitleProjectOptions {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct PreviewProxyOptions {
+    project_path: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SlowdownOptions {
     video_path: String,
     speed: f64,
@@ -140,6 +146,8 @@ struct SubtitleProjectData {
     project_path: String,
     video_path: String,
     output_path: String,
+    preview_path: String,
+    preview_ready: bool,
     project: serde_json::Value,
 }
 
@@ -321,6 +329,14 @@ fn output_path_for_project(project_path: &Path) -> Result<PathBuf, String> {
         .ok_or("The selected project filename is invalid.")?;
     let base = stem.strip_suffix(".dialogue-project").unwrap_or(stem);
     Ok(project_path.with_file_name(format!("{base}.dialogue-only.reviewed.mp4")))
+}
+
+fn preview_proxy_path_for(video_path: &Path) -> Result<PathBuf, String> {
+    let stem = video_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .ok_or("The selected video filename is invalid.")?;
+    Ok(video_path.with_file_name(format!("{stem}.dialogue-preview.mp4")))
 }
 
 fn output_path_for_slowdown(video_path: &Path, speed: f64) -> Result<PathBuf, String> {
@@ -1259,6 +1275,18 @@ fn thumbnail_data_url(ffmpeg: &Path, video_path: &Path, duration: Option<f64>) -
     ))
 }
 
+fn project_video_path(project_path: &Path) -> Result<PathBuf, String> {
+    let text = fs::read_to_string(project_path)
+        .map_err(|error| format!("Could not read {}: {error}", project_path.display()))?;
+    let project: serde_json::Value =
+        serde_json::from_str(&text).map_err(|error| format!("Project JSON is invalid: {error}"))?;
+    let video = project
+        .get("video")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("Project does not contain a source video path.")?;
+    Ok(PathBuf::from(video))
+}
+
 fn list_material_videos_inner(
     app: &AppHandle,
     state: &ConversionState,
@@ -1407,6 +1435,51 @@ fn run_project_render(
         .arg(project_path)
         .arg(output_path);
     prepend_runtime_path(&mut command, &paths);
+    run_logged_command(app, state, &mut command)
+}
+
+fn run_preview_proxy(
+    app: &AppHandle,
+    state: &ConversionState,
+    video_path: &Path,
+    output_path: &Path,
+) -> Result<(), String> {
+    let paths = media_paths(app, state)?;
+    let ffmpeg = paths.tools_dir.join("ffmpeg");
+    if !ffmpeg.is_file() {
+        return Err(format!("ffmpeg not found at {}.", ffmpeg.display()));
+    }
+
+    emit_status(
+        app,
+        "running",
+        "render",
+        "Building browser preview MP4",
+        Some(output_path),
+    );
+    let mut command = Command::new(ffmpeg);
+    command
+        .arg("-hide_banner")
+        .arg("-y")
+        .arg("-i")
+        .arg(video_path)
+        .args(["-map", "0:v:0"])
+        .args(["-map", "0:a:0?"])
+        .arg("-sn")
+        .args([
+            "-vf",
+            "scale=1280:-2:force_original_aspect_ratio=decrease,format=yuv420p",
+        ])
+        .args(["-c:v", "libx264"])
+        .args(["-preset", "veryfast"])
+        .args(["-crf", "28"])
+        .args(["-pix_fmt", "yuv420p"])
+        .args(["-profile:v", "main"])
+        .args(["-c:a", "aac"])
+        .args(["-b:a", "128k"])
+        .args(["-movflags", "+faststart"])
+        .arg(output_path);
+    prepend_media_path(&mut command, &paths);
     run_logged_command(app, state, &mut command)
 }
 
@@ -1602,11 +1675,19 @@ fn load_subtitle_project(options: SubtitleProjectOptions) -> Result<SubtitleProj
         .unwrap_or("")
         .to_string();
     let output_path = output_path_for_project(&project_path)?;
+    let preview_path = if video_path.is_empty() {
+        PathBuf::new()
+    } else {
+        preview_proxy_path_for(&PathBuf::from(&video_path))?
+    };
+    let preview_ready = preview_path.is_file();
 
     Ok(SubtitleProjectData {
         project_path: project_path.display().to_string(),
         video_path,
         output_path: output_path.display().to_string(),
+        preview_path: preview_path.display().to_string(),
+        preview_ready,
         project,
     })
 }
@@ -1684,6 +1765,80 @@ fn start_project_render(
                 "complete",
                 "complete",
                 "Committed dialogue MP4 is ready",
+                Some(&output_for_run),
+            ),
+            Err(error) => {
+                emit_log(&app_for_run, "stderr", &error);
+                emit_status(
+                    &app_for_run,
+                    "error",
+                    "error",
+                    &error,
+                    Some(&output_for_run),
+                );
+            }
+        }
+    });
+
+    Ok(output_path.display().to_string())
+}
+
+#[tauri::command]
+fn start_preview_proxy(
+    app: AppHandle,
+    state: State<'_, ConversionState>,
+    options: PreviewProxyOptions,
+) -> Result<String, String> {
+    if state.running.swap(true, Ordering::SeqCst) {
+        return Err("A process is already running.".into());
+    }
+    state.cancel_requested.store(false, Ordering::SeqCst);
+
+    let raw_project_path = options.project_path.trim();
+    if raw_project_path.is_empty() {
+        state.running.store(false, Ordering::SeqCst);
+        return Err("Choose an existing subtitle project first.".into());
+    }
+    let project_path = PathBuf::from(raw_project_path);
+    if !project_path.is_file() {
+        state.running.store(false, Ordering::SeqCst);
+        return Err("Choose an existing subtitle project first.".into());
+    }
+    let video_path = project_video_path(&project_path).map_err(|error| {
+        state.running.store(false, Ordering::SeqCst);
+        error
+    })?;
+    if !video_path.is_file() {
+        state.running.store(false, Ordering::SeqCst);
+        return Err("Project source video was not found.".into());
+    }
+    let output_path = preview_proxy_path_for(&video_path).map_err(|error| {
+        state.running.store(false, Ordering::SeqCst);
+        error
+    })?;
+
+    emit_status(
+        &app,
+        "running",
+        "setup",
+        "Checking media tools",
+        Some(&output_path),
+    );
+    let app_for_run = app.clone();
+    let video_for_run = video_path.clone();
+    let output_for_run = output_path.clone();
+    thread::spawn(move || {
+        let state = app_for_run.state::<ConversionState>();
+        let result = run_preview_proxy(&app_for_run, &state, &video_for_run, &output_for_run);
+        state.running.store(false, Ordering::SeqCst);
+        let _ = set_child_pid(&state, None);
+
+        match result {
+            Ok(()) => emit_status(
+                &app_for_run,
+                "complete",
+                "complete",
+                "Preview MP4 is ready",
                 Some(&output_for_run),
             ),
             Err(error) => {
@@ -1975,6 +2130,7 @@ pub fn run() {
             load_subtitle_project,
             save_subtitle_project,
             start_project_render,
+            start_preview_proxy,
             start_conversion,
             start_slowdown,
             probe_grab,
