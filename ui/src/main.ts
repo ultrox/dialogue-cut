@@ -126,7 +126,8 @@ const workflowPhases: Record<Workflow, readonly (readonly [string, string])[]> =
   ],
   player: [
     ["setup", "Prepare tools"],
-    ["render", "Render dialogue cut"],
+    ["render", "Render segments"],
+    ["stitch", "Stitch MP4"],
     ["subtitles", "Write subtitles"],
   ],
 };

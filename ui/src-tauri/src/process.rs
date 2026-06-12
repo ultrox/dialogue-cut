@@ -212,11 +212,16 @@ pub(crate) fn format_clock(seconds: f64) -> String {
 // Runs an ffmpeg command that was given `-nostats -progress pipe:1`. Progress
 // key=value lines arrive on stdout and are turned into conversion-progress
 // events instead of log noise; stderr is forwarded to the log as usual.
-pub(crate) fn run_ffmpeg_with_progress(
+//
+// `offset` is the output seconds already completed by earlier commands of the
+// same job, so multi-segment renders report one continuous bar against
+// `total` (the whole job's expected output duration).
+pub(crate) fn run_ffmpeg_with_progress_window(
     app: &AppHandle,
     state: &ConversionState,
     command: &mut Command,
-    duration: Option<f64>,
+    offset: f64,
+    total: Option<f64>,
 ) -> Result<(), String> {
     let app_progress = app.clone();
     let app_stderr = app.clone();
@@ -234,18 +239,14 @@ pub(crate) fn run_ffmpeg_with_progress(
                         }
                     } else if let Some(value) = line.strip_prefix("speed=") {
                         speed = value.trim().trim_end_matches('x').to_string();
-                    } else if let Some(value) = line.strip_prefix("progress=") {
-                        let finished = value.trim() == "end";
-                        let percent = if finished {
-                            Some(100.0)
-                        } else {
-                            duration
-                                .filter(|duration| *duration > 0.0)
-                                .map(|duration| (out_time / duration * 100.0).clamp(0.0, 100.0))
-                        };
-                        let mut detail = format_clock(out_time);
-                        if let Some(duration) = duration {
-                            detail.push_str(&format!(" / {}", format_clock(duration)));
+                    } else if line.starts_with("progress=") {
+                        let done = offset + out_time;
+                        let percent = total
+                            .filter(|total| *total > 0.0)
+                            .map(|total| (done / total * 100.0).clamp(0.0, 100.0));
+                        let mut detail = format_clock(done);
+                        if let Some(total) = total {
+                            detail.push_str(&format!(" / {}", format_clock(total)));
                         }
                         if !speed.is_empty() && speed != "N/A" {
                             detail.push_str(&format!(" at {speed}x"));

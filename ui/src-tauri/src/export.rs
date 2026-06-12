@@ -11,13 +11,71 @@ use tauri::AppHandle;
 use crate::events::{emit_log, emit_status};
 use crate::media::Ffmpeg;
 use crate::process::ConversionState;
-use crate::runtime::media_paths;
+use crate::runtime::{media_paths, ProcessorPaths};
+
+// Each kept range is rendered as its own segment, then stitched with the
+// concat demuxer. A single select-filter pass does not scale: hundreds of
+// between() terms crash ffmpeg's expression parser with ENOMEM, and it would
+// decode the whole movie anyway. Segment seeks only decode what is kept.
+#[allow(clippy::too_many_arguments)]
+fn render_segments(
+    app: &AppHandle,
+    state: &ConversionState,
+    paths: &ProcessorPaths,
+    video_path: &Path,
+    ranges: &[ExportRange],
+    total: f64,
+    work_dir: &Path,
+    output_path: &Path,
+) -> Result<(), String> {
+    let mut completed = 0.0_f64;
+    let mut concat_list = String::new();
+    for (index, range) in ranges.iter().enumerate() {
+        emit_status(
+            app,
+            "running",
+            "render",
+            &format!("Rendering segment {} of {}", index + 1, ranges.len()),
+            Some(output_path),
+        );
+        let part_name = format!("part-{index:05}.mp4");
+        Ffmpeg::new(paths)?
+            .seek(range.start)
+            .input(video_path)
+            .clip_duration(range.end - range.start)
+            .main_movie_streams()
+            .encode_h264(20)
+            .aac_audio()
+            .output(&work_dir.join(&part_name))
+            .run_window(app, state, completed, Some(total))?;
+        completed += range.end - range.start;
+        concat_list.push_str(&format!("file '{part_name}'\n"));
+    }
+
+    let list_path = work_dir.join("concat.txt");
+    fs::write(&list_path, concat_list)
+        .map_err(|error| format!("Could not write {}: {error}", list_path.display()))?;
+
+    emit_status(
+        app,
+        "running",
+        "stitch",
+        "Stitching the dialogue cut",
+        Some(output_path),
+    );
+    Ffmpeg::new(paths)?
+        .concat_input(&list_path)
+        .copy_streams()
+        .mp4_faststart()
+        .output(output_path)
+        .run(app, state, Some(total))
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ExportRange {
-    start: f64,
-    end: f64,
+    pub(crate) start: f64,
+    pub(crate) end: f64,
 }
 
 #[derive(Deserialize)]
@@ -53,14 +111,6 @@ fn validated_total(ranges: &[ExportRange]) -> Result<f64, String> {
     Ok(total)
 }
 
-fn select_expression(ranges: &[ExportRange]) -> String {
-    ranges
-        .iter()
-        .map(|range| format!("between(t,{:.3},{:.3})", range.start, range.end))
-        .collect::<Vec<_>>()
-        .join("+")
-}
-
 pub(crate) fn run_export(
     app: &AppHandle,
     state: &ConversionState,
@@ -71,28 +121,26 @@ pub(crate) fn run_export(
     let total = validated_total(&options.ranges)?;
     let paths = media_paths(app, state)?;
 
-    emit_status(
+    let stem = output_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("dialogue-cut");
+    let work_dir = output_path.with_file_name(format!("{stem}.export-tmp"));
+    fs::create_dir_all(&work_dir)
+        .map_err(|error| format!("Could not create {}: {error}", work_dir.display()))?;
+
+    let result = render_segments(
         app,
-        "running",
-        "render",
-        &format!("Rendering {} dialogue segments", options.ranges.len()),
-        Some(output_path),
+        state,
+        &paths,
+        &video_path,
+        &options.ranges,
+        total,
+        &work_dir,
+        output_path,
     );
-    // One pass over the source: select/aselect keep only the wanted ranges
-    // and the setpts/asetpts re-stamp them into one continuous timeline.
-    // The expression quotes ('...') are for ffmpeg's filter parser, which
-    // would otherwise read the commas inside between() as separators.
-    let expression = select_expression(&options.ranges);
-    Ffmpeg::new(&paths)?
-        .input(&video_path)
-        .main_movie_streams()
-        .video_filter(&format!("select='{expression}',setpts=N/FRAME_RATE/TB"))
-        .audio_filter(&format!("aselect='{expression}',asetpts=N/SR/TB"))
-        .encode_h264(20)
-        .aac_audio()
-        .mp4_faststart()
-        .output(output_path)
-        .run(app, state, Some(total))?;
+    let _ = fs::remove_dir_all(&work_dir);
+    result?;
 
     if !options.subtitles.trim().is_empty() {
         emit_status(

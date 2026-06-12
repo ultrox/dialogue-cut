@@ -7,7 +7,7 @@ use std::{
 };
 use tauri::AppHandle;
 
-use crate::process::{run_ffmpeg_with_progress, ConversionState};
+use crate::process::{run_ffmpeg_with_progress_window, ConversionState};
 use crate::runtime::{prepend_media_path, ProcessorPaths};
 
 /// Read-only media inspection via the bundled ffprobe.
@@ -77,8 +77,35 @@ impl<'a> Ffmpeg<'a> {
         Ok(Self { paths, command })
     }
 
+    /// Fast input seek; place before input(). Frame-accurate when combined
+    /// with re-encoding.
+    pub(crate) fn seek(mut self, seconds: f64) -> Self {
+        self.command.args(["-ss", &format!("{seconds:.3}")]);
+        self
+    }
+
     pub(crate) fn input(mut self, path: &Path) -> Self {
         self.command.arg("-i").arg(path);
+        self
+    }
+
+    /// Limits the output to this many seconds; place after input().
+    pub(crate) fn clip_duration(mut self, seconds: f64) -> Self {
+        self.command.args(["-t", &format!("{seconds:.3}")]);
+        self
+    }
+
+    /// Reads a concat-demuxer list file as the input.
+    pub(crate) fn concat_input(mut self, list_path: &Path) -> Self {
+        self.command
+            .args(["-f", "concat", "-safe", "0"])
+            .arg("-i")
+            .arg(list_path);
+        self
+    }
+
+    pub(crate) fn copy_streams(mut self) -> Self {
+        self.command.args(["-c", "copy"]);
         self
     }
 
@@ -154,13 +181,25 @@ impl<'a> Ffmpeg<'a> {
     /// `expected_duration` is the expected output duration used for the
     /// percentage; pass None when unknown.
     pub(crate) fn run(
-        mut self,
+        self,
         app: &AppHandle,
         state: &ConversionState,
         expected_duration: Option<f64>,
     ) -> Result<(), String> {
+        self.run_window(app, state, 0.0, expected_duration)
+    }
+
+    /// Like run(), but for one command of a multi-command job: `offset` output
+    /// seconds are already done and progress is reported against `total`.
+    pub(crate) fn run_window(
+        mut self,
+        app: &AppHandle,
+        state: &ConversionState,
+        offset: f64,
+        total: Option<f64>,
+    ) -> Result<(), String> {
         prepend_media_path(&mut self.command, self.paths);
-        run_ffmpeg_with_progress(app, state, &mut self.command, expected_duration)
+        run_ffmpeg_with_progress_window(app, state, &mut self.command, offset, total)
     }
 }
 
