@@ -5,9 +5,10 @@
 //! - process    — job slot, cancellation, child-process runners
 //! - runtime    — tool/runtime provisioning (python, ffmpeg, whisper, yt-dlp)
 //! - media      — ffmpeg/ffprobe wrappers and recipes
-//! - dialogue, slowdown, convert, transcribe, grabber — one module per workflow
+//! - dialogue, slowdown, convert, audio_video, merge, transcribe, grabber — one module per workflow
 //! - gallery    — material video listing
 
+mod audio_video;
 mod convert;
 mod dialogue;
 mod events;
@@ -16,6 +17,7 @@ mod gallery;
 mod grabber;
 mod media;
 mod media_server;
+mod merge;
 mod player;
 mod process;
 mod runtime;
@@ -25,6 +27,7 @@ mod transcribe;
 use std::{fs, path::PathBuf, sync::atomic::Ordering};
 use tauri::{AppHandle, State};
 
+use audio_video::{output_path_for_audio_video, run_audio_video, AudioVideoOptions};
 use convert::{output_path_for_convert, run_convert, ConvertOptions};
 use dialogue::{output_path_for, run_conversion, ConversionOptions};
 use events::{emit_log, emit_status, RuntimeStatus};
@@ -34,6 +37,7 @@ use grabber::{
     default_grab_output_dir, probe_grab_inner, run_grab, subtitle_language_spec, GrabMetadata,
     GrabOptions, GrabProbeOptions,
 };
+use merge::{output_path_for_merge, run_merge, validated_video_paths, MergeOptions};
 use player::{
     IgnoreLoadOptions, IgnoreSaveOptions, SubtitleFile, SubtitleListOptions, SubtitleReadOptions,
 };
@@ -107,6 +111,44 @@ fn start_convert(
         "Converted MP4 is ready",
         output_path,
         move |app, state| run_convert(app, state, &options, &worker_output),
+    )
+}
+
+#[tauri::command]
+fn start_merge(
+    app: AppHandle,
+    state: State<'_, ConversionState>,
+    options: MergeOptions,
+) -> Result<String, String> {
+    let video_paths = validated_video_paths(&options.video_paths)?;
+    let output_path = output_path_for_merge(&video_paths, &options.output_path)?;
+    let worker_output = output_path.clone();
+    start_background_job(
+        app,
+        &state,
+        "Checking media tools",
+        "Merged video is ready",
+        output_path,
+        move |app, state| run_merge(app, state, &options, &worker_output),
+    )
+}
+
+#[tauri::command]
+fn start_audio_video(
+    app: AppHandle,
+    state: State<'_, ConversionState>,
+    options: AudioVideoOptions,
+) -> Result<String, String> {
+    let audio_path = existing_file(&options.audio_path)?;
+    let output_path = output_path_for_audio_video(&audio_path, &options.output_path)?;
+    let worker_output = output_path.clone();
+    start_background_job(
+        app,
+        &state,
+        "Checking media tools",
+        "Audio video is ready",
+        output_path,
+        move |app, state| run_audio_video(app, state, &options, &worker_output),
     )
 }
 
@@ -331,6 +373,8 @@ pub fn run() {
             start_conversion,
             start_slowdown,
             start_convert,
+            start_audio_video,
+            start_merge,
             start_transcribe,
             list_whisper_models,
             start_model_download,

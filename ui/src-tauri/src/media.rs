@@ -53,6 +53,25 @@ impl MediaProbe {
             &["-select_streams", "v:0", "-show_entries", "stream=codec_name"],
         )
     }
+
+    pub(crate) fn video_dimensions(&self, target: &Path) -> Option<(u32, u32)> {
+        let output = self.entry(
+            target,
+            &["-select_streams", "v:0", "-show_entries", "stream=width,height"],
+        )?;
+        let mut lines = output.lines();
+        let width = lines.next()?.parse().ok()?;
+        let height = lines.next()?.parse().ok()?;
+        Some((width, height))
+    }
+
+    pub(crate) fn has_audio(&self, target: &Path) -> bool {
+        self.entry(
+            target,
+            &["-select_streams", "a:0", "-show_entries", "stream=index"],
+        )
+        .is_some()
+    }
 }
 
 /// Fluent wrapper around the bundled ffmpeg. Centralizes the shared plumbing
@@ -70,8 +89,11 @@ impl<'a> Ffmpeg<'a> {
             return Err(format!("ffmpeg not found at {}.", binary.display()));
         }
         let mut command = Command::new(binary);
+        // errors-only: the metadata dump ffmpeg prints per run floods the UI
+        // log when a job runs hundreds of commands (dialogue-cut segments).
         command
             .arg("-hide_banner")
+            .args(["-loglevel", "error"])
             .arg("-y")
             .args(["-nostats", "-progress", "pipe:1"]);
         Ok(Self { paths, command })

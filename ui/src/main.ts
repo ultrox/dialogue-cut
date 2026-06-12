@@ -1,8 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import {
+  ArrowDown,
   ArrowRightLeft,
+  ArrowUp,
   Captions,
   CheckCircle2,
   Circle,
@@ -10,7 +12,10 @@ import {
   Film,
   FolderOpen,
   HardDriveDownload,
+  ListPlus,
   LoaderCircle,
+  Merge,
+  Music,
   Play,
   RefreshCw,
   RotateCcw,
@@ -27,6 +32,8 @@ type Workflow =
   | "dialogue"
   | "processing"
   | "converter"
+  | "audioVideo"
+  | "merger"
   | "transcribe"
   | "player"
   | "grabber";
@@ -112,6 +119,16 @@ const workflowPhases: Record<Workflow, readonly (readonly [string, string])[]> =
     ["inspect", "Inspect source"],
     ["convert", "Convert to MP4"],
   ],
+  audioVideo: [
+    ["setup", "Prepare tools"],
+    ["inspect", "Inspect audio"],
+    ["render", "Render MP4"],
+  ],
+  merger: [
+    ["setup", "Prepare tools"],
+    ["inspect", "Inspect sources"],
+    ["merge", "Merge videos"],
+  ],
   transcribe: [
     ["setup", "Prepare runtime"],
     ["extract", "Extract audio"],
@@ -142,6 +159,7 @@ let currentStatus: ConversionStatus = {
 };
 let grabMetadata: GrabMetadata | null = null;
 let materialGalleryLoadId = 0;
+let mergeVideoPaths: string[] = [];
 
 app.innerHTML = `
   <header class="app-header">
@@ -169,6 +187,14 @@ app.innerHTML = `
         <button id="converter-tab" class="tab-button" type="button">
           <i data-lucide="arrow-right-left"></i>
           <span>Converter</span>
+        </button>
+        <button id="audio-video-tab" class="tab-button" type="button">
+          <i data-lucide="music"></i>
+          <span>Audio video</span>
+        </button>
+        <button id="merger-tab" class="tab-button" type="button">
+          <i data-lucide="merge"></i>
+          <span>Merger</span>
         </button>
         <button id="transcribe-tab" class="tab-button" type="button">
           <i data-lucide="captions"></i>
@@ -401,6 +427,166 @@ app.innerHTML = `
           </div>
           <p id="converter-progress-detail" class="field-note"></p>
           <p id="converter-output-path" class="output-path"></p>
+        </section>
+      </div>
+
+      <div id="audio-video-panel" class="tab-panel">
+        <section class="section-block source-block">
+          <div class="section-heading">
+            <div>
+              <span class="eyebrow">Source</span>
+              <h2>Select audio</h2>
+            </div>
+            <i data-lucide="music"></i>
+          </div>
+          <div class="file-row">
+            <input id="audio-video-audio-path" type="text" placeholder="/path/to/audio.mp3" spellcheck="false" />
+            <button id="audio-video-browse-button" class="icon-button" type="button" title="Choose audio">
+              <i data-lucide="folder-open"></i>
+            </button>
+          </div>
+        </section>
+
+        <section class="section-block">
+          <div class="section-heading">
+            <div>
+              <span class="eyebrow">Frame</span>
+              <h2>Static background</h2>
+            </div>
+            <i data-lucide="settings-2"></i>
+          </div>
+          <div class="metadata-grid">
+            <div>
+              <span class="field-label">Resolution</span>
+              <div class="preset-row frame-preset-row">
+                <button class="audio-video-resolution-button preset-button active" type="button" data-resolution="1920x1080">1080p</button>
+                <button class="audio-video-resolution-button preset-button" type="button" data-resolution="1280x720">720p</button>
+                <button class="audio-video-resolution-button preset-button" type="button" data-resolution="1080x1080">Square</button>
+              </div>
+            </div>
+            <div>
+              <span class="field-label">Background</span>
+              <div class="color-swatch-row">
+                <button class="audio-video-background-button color-swatch-button active" type="button" data-background="111827" title="Charcoal">
+                  <span style="background:#111827"></span>
+                </button>
+                <button class="audio-video-background-button color-swatch-button" type="button" data-background="0f766e" title="Teal">
+                  <span style="background:#0f766e"></span>
+                </button>
+                <button class="audio-video-background-button color-swatch-button" type="button" data-background="7c2d12" title="Copper">
+                  <span style="background:#7c2d12"></span>
+                </button>
+                <button class="audio-video-background-button color-swatch-button" type="button" data-background="f8fafc" title="Light">
+                  <span style="background:#f8fafc"></span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="section-block">
+          <div class="section-heading">
+            <div>
+              <span class="eyebrow">Output</span>
+              <h2>Final MP4</h2>
+            </div>
+            <i data-lucide="file-text"></i>
+          </div>
+          <div class="file-row">
+            <input id="audio-video-output-path" type="text" placeholder="/path/to/audio-video.mp4" spellcheck="false" />
+            <button id="audio-video-output-browse-button" class="icon-button" type="button" title="Choose output file">
+              <i data-lucide="folder-open"></i>
+            </button>
+          </div>
+        </section>
+
+        <section class="section-block run-block">
+          <div class="section-heading compact">
+            <div>
+              <span class="eyebrow">Run</span>
+              <h2 id="audio-video-run-message">Choose an audio file to begin</h2>
+            </div>
+          </div>
+          <div class="action-row">
+            <button id="audio-video-start-button" class="primary-button" type="button">
+              <i data-lucide="play"></i>
+              <span>Create video</span>
+            </button>
+            <button id="audio-video-stop-button" class="secondary-button" type="button" disabled>
+              <i data-lucide="square"></i>
+              <span>Cancel</span>
+            </button>
+          </div>
+          <div id="audio-video-progress" class="progress-track" hidden>
+            <span id="audio-video-progress-fill"></span>
+          </div>
+          <p id="audio-video-progress-detail" class="field-note"></p>
+          <p id="audio-video-output-display" class="output-path"></p>
+        </section>
+      </div>
+
+      <div id="merger-panel" class="tab-panel">
+        <section class="section-block source-block">
+          <div class="section-heading">
+            <div>
+              <span class="eyebrow">Source</span>
+              <h2>Merge order</h2>
+            </div>
+            <i data-lucide="list-plus"></i>
+          </div>
+          <div class="action-row">
+            <button id="merger-add-button" class="primary-button" type="button">
+              <i data-lucide="list-plus"></i>
+              <span>Add videos</span>
+            </button>
+            <button id="merger-clear-button" class="secondary-button" type="button">
+              <i data-lucide="trash-2"></i>
+              <span>Clear</span>
+            </button>
+          </div>
+          <div id="merger-file-list" class="merge-file-list">
+            <p class="empty-note">No videos selected.</p>
+          </div>
+        </section>
+
+        <section class="section-block">
+          <div class="section-heading">
+            <div>
+              <span class="eyebrow">Output</span>
+              <h2>Final MP4</h2>
+            </div>
+            <i data-lucide="file-text"></i>
+          </div>
+          <div class="file-row">
+            <input id="merger-output-path" type="text" placeholder="/path/to/merged.mp4" spellcheck="false" />
+            <button id="merger-output-browse-button" class="icon-button" type="button" title="Choose output file">
+              <i data-lucide="folder-open"></i>
+            </button>
+          </div>
+        </section>
+
+        <section class="section-block run-block">
+          <div class="section-heading compact">
+            <div>
+              <span class="eyebrow">Run</span>
+              <h2 id="merger-run-message">Select at least two videos</h2>
+            </div>
+          </div>
+          <div class="action-row">
+            <button id="merger-start-button" class="primary-button" type="button">
+              <i data-lucide="play"></i>
+              <span>Start merge</span>
+            </button>
+            <button id="merger-stop-button" class="secondary-button" type="button" disabled>
+              <i data-lucide="square"></i>
+              <span>Cancel</span>
+            </button>
+          </div>
+          <div id="merger-progress" class="progress-track" hidden>
+            <span id="merger-progress-fill"></span>
+          </div>
+          <p id="merger-progress-detail" class="field-note"></p>
+          <p id="merger-output-display" class="output-path"></p>
         </section>
       </div>
 
@@ -693,7 +879,9 @@ app.innerHTML = `
 
 createIcons({
   icons: {
+    ArrowDown,
     ArrowRightLeft,
+    ArrowUp,
     Captions,
     CheckCircle2,
     Circle,
@@ -701,7 +889,10 @@ createIcons({
     Film,
     FolderOpen,
     HardDriveDownload,
+    ListPlus,
     LoaderCircle,
+    Merge,
+    Music,
     Play,
     RefreshCw,
     RotateCcw,
@@ -722,6 +913,8 @@ const workflowTabs: Record<Workflow, HTMLButtonElement> = {
   dialogue: byId("dialogue-tab"),
   processing: byId("processing-tab"),
   converter: byId("converter-tab"),
+  audioVideo: byId("audio-video-tab"),
+  merger: byId("merger-tab"),
   transcribe: byId("transcribe-tab"),
   player: byId("player-tab"),
   grabber: byId("grabber-tab"),
@@ -730,6 +923,8 @@ const workflowPanels: Record<Workflow, HTMLElement> = {
   dialogue: byId("dialogue-panel"),
   processing: byId("processing-panel"),
   converter: byId("converter-panel"),
+  audioVideo: byId("audio-video-panel"),
+  merger: byId("merger-panel"),
   transcribe: byId("transcribe-panel"),
   player: byId("player-panel"),
   grabber: byId("grabber-panel"),
@@ -738,6 +933,8 @@ const workflowRunMessages: Record<JobWorkflow, HTMLElement> = {
   dialogue: byId("dialogue-run-message"),
   processing: byId("processing-run-message"),
   converter: byId("converter-run-message"),
+  audioVideo: byId("audio-video-run-message"),
+  merger: byId("merger-run-message"),
   transcribe: byId("transcribe-run-message"),
   player: byId("player-run-message"),
   grabber: byId("grabber-run-message"),
@@ -746,6 +943,8 @@ const workflowOutputPaths: Record<JobWorkflow, HTMLElement> = {
   dialogue: byId("dialogue-output-path"),
   processing: byId("processing-output-path"),
   converter: byId("converter-output-path"),
+  audioVideo: byId("audio-video-output-display"),
+  merger: byId("merger-output-display"),
   transcribe: byId("transcribe-output-path"),
   player: byId("player-output-path"),
   grabber: byId("grabber-output-path"),
@@ -754,17 +953,27 @@ const workflowOutputPaths: Record<JobWorkflow, HTMLElement> = {
 const dialogueVideoPath = byId<HTMLInputElement>("dialogue-video-path");
 const processingVideoPath = byId<HTMLInputElement>("processing-video-path");
 const converterVideoPath = byId<HTMLInputElement>("converter-video-path");
+const audioVideoAudioPath = byId<HTMLInputElement>("audio-video-audio-path");
+const audioVideoOutputPath = byId<HTMLInputElement>("audio-video-output-path");
+const mergerOutputPath = byId<HTMLInputElement>("merger-output-path");
 const transcribeVideoPath = byId<HTMLInputElement>("transcribe-video-path");
 const grabUrl = byId<HTMLInputElement>("grab-url");
 const grabOutputDir = byId<HTMLInputElement>("grab-output-dir");
 const dialogueBrowseButton = byId<HTMLButtonElement>("dialogue-browse-button");
 const processingBrowseButton = byId<HTMLButtonElement>("processing-browse-button");
 const converterBrowseButton = byId<HTMLButtonElement>("converter-browse-button");
+const audioVideoBrowseButton = byId<HTMLButtonElement>("audio-video-browse-button");
+const audioVideoOutputBrowseButton = byId<HTMLButtonElement>("audio-video-output-browse-button");
+const mergerAddButton = byId<HTMLButtonElement>("merger-add-button");
+const mergerClearButton = byId<HTMLButtonElement>("merger-clear-button");
+const mergerOutputBrowseButton = byId<HTMLButtonElement>("merger-output-browse-button");
 const transcribeBrowseButton = byId<HTMLButtonElement>("transcribe-browse-button");
 const grabOutputBrowseButton = byId<HTMLButtonElement>("grab-output-browse-button");
 const dialogueStartButton = byId<HTMLButtonElement>("dialogue-start-button");
 const processingStartButton = byId<HTMLButtonElement>("processing-start-button");
 const converterStartButton = byId<HTMLButtonElement>("converter-start-button");
+const audioVideoStartButton = byId<HTMLButtonElement>("audio-video-start-button");
+const mergerStartButton = byId<HTMLButtonElement>("merger-start-button");
 const transcribeStartButton = byId<HTMLButtonElement>("transcribe-start-button");
 const grabberStartButton = byId<HTMLButtonElement>("grabber-start-button");
 const grabberActionLabel = byId<HTMLElement>("grabber-action-label");
@@ -772,6 +981,8 @@ const materialRefreshButton = byId<HTMLButtonElement>("material-refresh-button")
 const dialogueStopButton = byId<HTMLButtonElement>("dialogue-stop-button");
 const processingStopButton = byId<HTMLButtonElement>("processing-stop-button");
 const converterStopButton = byId<HTMLButtonElement>("converter-stop-button");
+const audioVideoStopButton = byId<HTMLButtonElement>("audio-video-stop-button");
+const mergerStopButton = byId<HTMLButtonElement>("merger-stop-button");
 const transcribeStopButton = byId<HTMLButtonElement>("transcribe-stop-button");
 const grabberStopButton = byId<HTMLButtonElement>("grabber-stop-button");
 const forceTranscribe = byId<HTMLInputElement>("force-transcribe");
@@ -817,6 +1028,16 @@ const workflowProgress: Partial<Record<Workflow, ProgressElements>> = {
     fill: byId("converter-progress-fill"),
     detail: byId("converter-progress-detail"),
   },
+  audioVideo: {
+    track: byId("audio-video-progress"),
+    fill: byId("audio-video-progress-fill"),
+    detail: byId("audio-video-progress-detail"),
+  },
+  merger: {
+    track: byId("merger-progress"),
+    fill: byId("merger-progress-fill"),
+    detail: byId("merger-progress-detail"),
+  },
   transcribe: {
     track: byId("transcribe-progress"),
     fill: byId("transcribe-progress-fill"),
@@ -835,6 +1056,7 @@ const grabQuality = document.querySelector<HTMLSelectElement>("#grab-quality")!;
 const grabSubtitleOptions = document.querySelector<HTMLElement>("#grab-subtitle-options")!;
 const statusChip = document.querySelector<HTMLElement>("#status-chip")!;
 const materialGallery = document.querySelector<HTMLElement>("#material-gallery")!;
+const mergerFileList = document.querySelector<HTMLElement>("#merger-file-list")!;
 const logOutput = document.querySelector<HTMLElement>("#log-output")!;
 const phaseList = document.querySelector<HTMLOListElement>("#phase-list")!;
 const runtimeChip = document.querySelector<HTMLElement>("#runtime-chip")!;
@@ -847,12 +1069,20 @@ const presetButtons = Array.from(
 const convertModeButtons = Array.from(
   document.querySelectorAll<HTMLButtonElement>(".convert-mode-button"),
 );
+const audioVideoResolutionButtons = Array.from(
+  document.querySelectorAll<HTMLButtonElement>(".audio-video-resolution-button"),
+);
+const audioVideoBackgroundButtons = Array.from(
+  document.querySelectorAll<HTMLButtonElement>(".audio-video-background-button"),
+);
 
 const convertModeNotes: Record<string, string> = {
   reencode: "Most compatible for editing. Re-encodes everything, so it takes a while.",
   remux: "Copies the video stream into MP4 and converts audio to AAC. Fast, but editors may struggle with HEVC/AV1 sources.",
 };
 let convertMode = "reencode";
+let audioVideoResolution = "1920x1080";
+let audioVideoBackground = "111827";
 
 function numberValue(id: string): number {
   return Number(document.querySelector<HTMLInputElement>(`#${id}`)!.value);
@@ -909,20 +1139,36 @@ function setRunControls(running: boolean) {
   dialogueStartButton.disabled = running;
   processingStartButton.disabled = running;
   converterStartButton.disabled = running;
+  audioVideoStartButton.disabled = running || !audioVideoAudioPath.value.trim();
+  mergerStartButton.disabled = running || mergeVideoPaths.length < 2;
   transcribeStartButton.disabled = running;
   playerStartButton.disabled = running;
   dialogueStopButton.disabled = !running;
   processingStopButton.disabled = !running;
   converterStopButton.disabled = !running;
+  audioVideoStopButton.disabled = !running;
+  mergerStopButton.disabled = !running;
   transcribeStopButton.disabled = !running;
   playerStopButton.disabled = !running;
   grabberStopButton.disabled = !running;
   dialogueBrowseButton.disabled = running;
   processingBrowseButton.disabled = running;
   converterBrowseButton.disabled = running;
+  audioVideoBrowseButton.disabled = running;
+  audioVideoOutputBrowseButton.disabled = running;
+  audioVideoResolutionButtons.forEach((button) => {
+    button.disabled = running;
+  });
+  audioVideoBackgroundButtons.forEach((button) => {
+    button.disabled = running;
+  });
+  mergerAddButton.disabled = running;
+  mergerClearButton.disabled = running || mergeVideoPaths.length === 0;
+  mergerOutputBrowseButton.disabled = running;
   transcribeBrowseButton.disabled = running;
   grabOutputBrowseButton.disabled = running;
   materialRefreshButton.disabled = running;
+  applyMergeControlState(running);
   applyGrabControlState(running);
   updateTranscribeModelControls(running);
 }
@@ -947,7 +1193,14 @@ function setStatus(status: ConversionStatus) {
 
   workflowRunMessages[workflow].textContent = status.message;
   workflowOutputPaths[workflow].textContent =
-    status.outputPath ?? (workflow === "grabber" ? grabOutputDir.value.trim() : "");
+    status.outputPath ??
+    (workflow === "grabber"
+      ? grabOutputDir.value.trim()
+      : workflow === "audioVideo"
+        ? audioVideoOutputPath.value.trim()
+        : workflow === "merger"
+        ? mergerOutputPath.value.trim()
+        : "");
   if (!running) {
     resetRunProgress();
   }
@@ -984,13 +1237,35 @@ function updateRunProgress(progress: ConversionProgress) {
   elements.detail.textContent = progress.detail;
 }
 
-function appendLog(entry: ConversionLog) {
-  if (logOutput.textContent === "Waiting for a run...") {
-    logOutput.textContent = "";
-  }
-  const prefix = entry.stream === "stderr" ? "! " : "  ";
-  logOutput.textContent += `${prefix}${entry.line}\n`;
+// The log is kept as a bounded buffer and flushed once per frame; naive
+// per-line textContent appends are quadratic and freeze the UI when a job
+// emits thousands of lines.
+const logLines: string[] = [];
+const MAX_LOG_LINES = 400;
+let logFlushQueued = false;
+
+function flushLog() {
+  logFlushQueued = false;
+  logOutput.textContent =
+    logLines.length > 0 ? `${logLines.join("\n")}\n` : "Waiting for a run...";
   logOutput.scrollTop = logOutput.scrollHeight;
+}
+
+function appendLog(entry: ConversionLog) {
+  const prefix = entry.stream === "stderr" ? "! " : "  ";
+  logLines.push(`${prefix}${entry.line}`);
+  if (logLines.length > MAX_LOG_LINES) {
+    logLines.splice(0, logLines.length - MAX_LOG_LINES);
+  }
+  if (!logFlushQueued) {
+    logFlushQueued = true;
+    requestAnimationFrame(flushLog);
+  }
+}
+
+function clearLog() {
+  logLines.length = 0;
+  logOutput.textContent = "";
 }
 
 function setRuntimeStatus(status: RuntimeStatus) {
@@ -1238,8 +1513,240 @@ const workflowReadyMessages: Partial<Record<Workflow, string>> = {
   dialogue: "Ready to convert",
   processing: "Ready to transcode",
   converter: "Ready to convert",
+  audioVideo: "Ready to create video",
+  merger: "Ready to merge",
   transcribe: "Ready to transcribe",
 };
+
+function fileName(path: string): string {
+  return path.split(/[\\/]/).pop() ?? path;
+}
+
+function defaultMergeOutputPath(): string {
+  const firstPath = mergeVideoPaths[0];
+  if (!firstPath) {
+    return "";
+  }
+  const separatorIndex = Math.max(firstPath.lastIndexOf("/"), firstPath.lastIndexOf("\\"));
+  const directory = separatorIndex === -1 ? "" : firstPath.slice(0, separatorIndex + 1);
+  const name = firstPath.slice(separatorIndex + 1);
+  const stem = name.replace(/\.[^.]*$/, "") || "merged";
+  return `${directory}${stem}.merged.mp4`;
+}
+
+function defaultAudioVideoOutputPath(): string {
+  const sourcePath = audioVideoAudioPath.value.trim();
+  if (!sourcePath) {
+    return "";
+  }
+  const separatorIndex = Math.max(sourcePath.lastIndexOf("/"), sourcePath.lastIndexOf("\\"));
+  const directory = separatorIndex === -1 ? "" : sourcePath.slice(0, separatorIndex + 1);
+  const name = sourcePath.slice(separatorIndex + 1);
+  const stem = name.replace(/\.[^.]*$/, "") || "audio";
+  return `${directory}${stem}.audio-video.mp4`;
+}
+
+function setAudioVideoStatus() {
+  setStatus({
+    status: "idle",
+    phase: "inspect",
+    message: audioVideoAudioPath.value.trim() ? "Ready to create video" : "Choose an audio file to begin",
+  });
+}
+
+function updateAudioVideoResolution(resolution: string) {
+  audioVideoResolution = resolution;
+  audioVideoResolutionButtons.forEach((button) => {
+    button.classList.toggle("active", button.dataset.resolution === resolution);
+  });
+}
+
+function updateAudioVideoBackground(background: string) {
+  audioVideoBackground = background;
+  audioVideoBackgroundButtons.forEach((button) => {
+    button.classList.toggle("active", button.dataset.background === background);
+  });
+}
+
+async function chooseAudioForVideo() {
+  const selected = await open({
+    multiple: false,
+    directory: false,
+    filters: [{ name: "Audio", extensions: audioExtensions }],
+  });
+  if (typeof selected === "string") {
+    audioVideoAudioPath.value = selected;
+    if (!audioVideoOutputPath.value.trim()) {
+      audioVideoOutputPath.value = defaultAudioVideoOutputPath();
+    }
+    setActiveWorkflow("audioVideo");
+    setAudioVideoStatus();
+  }
+}
+
+async function chooseAudioVideoOutput() {
+  const selected = await save({
+    defaultPath: audioVideoOutputPath.value.trim() || defaultAudioVideoOutputPath() || "audio-video.mp4",
+    filters: [{ name: "MP4 video", extensions: ["mp4"] }],
+  });
+  if (selected) {
+    audioVideoOutputPath.value = selected;
+    workflowOutputPaths.audioVideo.textContent = selected;
+    setActiveWorkflow("audioVideo");
+    setAudioVideoStatus();
+  }
+}
+
+function setMergerStatus() {
+  setStatus({
+    status: "idle",
+    phase: "inspect",
+    message: mergeVideoPaths.length >= 2 ? "Ready to merge" : "Select at least two videos",
+  });
+}
+
+function applyMergeControlState(running = currentStatus.status === "running") {
+  mergerStartButton.disabled = running || mergeVideoPaths.length < 2;
+  mergerClearButton.disabled = running || mergeVideoPaths.length === 0;
+  mergerFileList
+    .querySelectorAll<HTMLButtonElement>("button")
+    .forEach((button) => {
+      if (running) {
+        button.disabled = true;
+        return;
+      }
+      if (button.dataset.direction === "up") {
+        button.disabled = button.dataset.index === "0";
+      } else if (button.dataset.direction === "down") {
+        button.disabled = Number(button.dataset.index) === mergeVideoPaths.length - 1;
+      } else {
+        button.disabled = false;
+      }
+    });
+}
+
+function moveMergeVideo(index: number, direction: -1 | 1) {
+  const targetIndex = index + direction;
+  if (targetIndex < 0 || targetIndex >= mergeVideoPaths.length) {
+    return;
+  }
+  const [path] = mergeVideoPaths.splice(index, 1);
+  mergeVideoPaths.splice(targetIndex, 0, path);
+  renderMergeList();
+  setMergerStatus();
+}
+
+function removeMergeVideo(index: number) {
+  mergeVideoPaths.splice(index, 1);
+  if (mergeVideoPaths.length === 0) {
+    mergerOutputPath.value = "";
+  }
+  renderMergeList();
+  setMergerStatus();
+}
+
+function renderMergeList() {
+  mergerFileList.replaceChildren();
+  if (mergeVideoPaths.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "empty-note";
+    empty.textContent = "No videos selected.";
+    mergerFileList.append(empty);
+    applyMergeControlState();
+    return;
+  }
+
+  mergeVideoPaths.forEach((path, index) => {
+    const row = document.createElement("div");
+    row.className = "merge-file-row";
+
+    const indexLabel = document.createElement("span");
+    indexLabel.className = "merge-file-index";
+    indexLabel.textContent = String(index + 1);
+
+    const meta = document.createElement("span");
+    meta.className = "merge-file-meta";
+    const name = document.createElement("strong");
+    name.textContent = fileName(path);
+    const fullPath = document.createElement("small");
+    fullPath.textContent = path;
+    meta.append(name, fullPath);
+
+    const actions = document.createElement("span");
+    actions.className = "merge-file-actions";
+
+    const up = document.createElement("button");
+    up.className = "icon-button";
+    up.type = "button";
+    up.title = "Move up";
+    up.dataset.direction = "up";
+    up.dataset.index = String(index);
+    up.disabled = index === 0;
+    up.innerHTML = `<i data-lucide="arrow-up"></i>`;
+    up.addEventListener("click", () => moveMergeVideo(index, -1));
+
+    const down = document.createElement("button");
+    down.className = "icon-button";
+    down.type = "button";
+    down.title = "Move down";
+    down.dataset.direction = "down";
+    down.dataset.index = String(index);
+    down.disabled = index === mergeVideoPaths.length - 1;
+    down.innerHTML = `<i data-lucide="arrow-down"></i>`;
+    down.addEventListener("click", () => moveMergeVideo(index, 1));
+
+    const remove = document.createElement("button");
+    remove.className = "icon-button";
+    remove.type = "button";
+    remove.title = "Remove";
+    remove.innerHTML = `<i data-lucide="trash-2"></i>`;
+    remove.addEventListener("click", () => removeMergeVideo(index));
+
+    actions.append(up, down, remove);
+    row.append(indexLabel, meta, actions);
+    mergerFileList.append(row);
+  });
+
+  createIcons({ icons: { ArrowDown, ArrowUp, Trash2 } });
+  applyMergeControlState();
+}
+
+async function chooseMergeVideos() {
+  const selected = await open({
+    multiple: true,
+    directory: false,
+    filters: [{ name: "Video", extensions: videoExtensions }],
+  });
+  const paths = Array.isArray(selected)
+    ? selected
+    : typeof selected === "string"
+      ? [selected]
+      : [];
+  if (paths.length === 0) {
+    return;
+  }
+  const existing = new Set(mergeVideoPaths);
+  mergeVideoPaths = [...mergeVideoPaths, ...paths.filter((path) => !existing.has(path))];
+  if (!mergerOutputPath.value.trim()) {
+    mergerOutputPath.value = defaultMergeOutputPath();
+  }
+  setActiveWorkflow("merger");
+  renderMergeList();
+  setMergerStatus();
+}
+
+async function chooseMergeOutput() {
+  const selected = await save({
+    defaultPath: mergerOutputPath.value.trim() || defaultMergeOutputPath() || "merged.mp4",
+    filters: [{ name: "MP4 video", extensions: ["mp4"] }],
+  });
+  if (selected) {
+    mergerOutputPath.value = selected;
+    workflowOutputPaths.merger.textContent = selected;
+    setActiveWorkflow("merger");
+    setMergerStatus();
+  }
+}
 
 async function chooseVideo(
   target: HTMLInputElement,
@@ -1288,6 +1795,8 @@ workflowTabs.processing.addEventListener("click", () => {
   void loadMaterialGallery();
 });
 workflowTabs.converter.addEventListener("click", () => setActiveWorkflow("converter"));
+workflowTabs.audioVideo.addEventListener("click", () => setActiveWorkflow("audioVideo"));
+workflowTabs.merger.addEventListener("click", () => setActiveWorkflow("merger"));
 workflowTabs.transcribe.addEventListener("click", () => setActiveWorkflow("transcribe"));
 workflowTabs.player.addEventListener("click", () => setActiveWorkflow("player"));
 workflowTabs.grabber.addEventListener("click", () => setActiveWorkflow("grabber"));
@@ -1296,6 +1805,39 @@ processingBrowseButton.addEventListener("click", () =>
   chooseVideo(processingVideoPath, "processing", grabOutputDir.value.trim()),
 );
 converterBrowseButton.addEventListener("click", () => chooseVideo(converterVideoPath, "converter"));
+audioVideoBrowseButton.addEventListener("click", () => void chooseAudioForVideo());
+audioVideoAudioPath.addEventListener("change", () => {
+  if (!audioVideoOutputPath.value.trim()) {
+    audioVideoOutputPath.value = defaultAudioVideoOutputPath();
+  }
+  setAudioVideoStatus();
+});
+audioVideoOutputBrowseButton.addEventListener("click", () => void chooseAudioVideoOutput());
+audioVideoOutputPath.addEventListener("input", () => {
+  workflowOutputPaths.audioVideo.textContent = audioVideoOutputPath.value.trim();
+});
+audioVideoResolutionButtons.forEach((button) => {
+  button.addEventListener("click", () =>
+    updateAudioVideoResolution(button.dataset.resolution ?? "1920x1080"),
+  );
+});
+audioVideoBackgroundButtons.forEach((button) => {
+  button.addEventListener("click", () =>
+    updateAudioVideoBackground(button.dataset.background ?? "111827"),
+  );
+});
+mergerAddButton.addEventListener("click", () => void chooseMergeVideos());
+mergerClearButton.addEventListener("click", () => {
+  mergeVideoPaths = [];
+  mergerOutputPath.value = "";
+  workflowOutputPaths.merger.textContent = "";
+  renderMergeList();
+  setMergerStatus();
+});
+mergerOutputBrowseButton.addEventListener("click", () => void chooseMergeOutput());
+mergerOutputPath.addEventListener("input", () => {
+  workflowOutputPaths.merger.textContent = mergerOutputPath.value.trim();
+});
 transcribeBrowseButton.addEventListener("click", () =>
   chooseVideo(transcribeVideoPath, "transcribe", undefined, [
     ...videoExtensions,
@@ -1342,7 +1884,7 @@ convertModeButtons.forEach((button) => {
 async function startRun(workflow: JobWorkflow, command: string, options: Record<string, unknown>) {
   setActiveWorkflow(workflow);
   runningWorkflow = workflow;
-  logOutput.textContent = "";
+  clearLog();
   try {
     const expectedOutput = await invoke<string>(command, { options });
     workflowOutputPaths[workflow].textContent = expectedOutput;
@@ -1378,6 +1920,22 @@ converterStartButton.addEventListener("click", () =>
   startRun("converter", "start_convert", {
     videoPath: converterVideoPath.value.trim(),
     mode: convertMode,
+  }),
+);
+
+audioVideoStartButton.addEventListener("click", () =>
+  startRun("audioVideo", "start_audio_video", {
+    audioPath: audioVideoAudioPath.value.trim(),
+    outputPath: audioVideoOutputPath.value.trim(),
+    resolution: audioVideoResolution,
+    background: audioVideoBackground,
+  }),
+);
+
+mergerStartButton.addEventListener("click", () =>
+  startRun("merger", "start_merge", {
+    videoPaths: mergeVideoPaths,
+    outputPath: mergerOutputPath.value.trim(),
   }),
 );
 
@@ -1479,7 +2037,7 @@ transcribeModelDeleteButton.addEventListener("click", async () => {
 async function inspectGrabUrl() {
   setActiveWorkflow("grabber");
   runningWorkflow = "grabber";
-  logOutput.textContent = "";
+  clearLog();
   resetGrabMetadata();
   try {
     const metadata = await invoke<GrabMetadata>("probe_grab", {
@@ -1508,7 +2066,7 @@ async function inspectGrabUrl() {
 async function downloadGrabSelection() {
   setActiveWorkflow("grabber");
   runningWorkflow = "grabber";
-  logOutput.textContent = "";
+  clearLog();
   try {
     const subtitleLanguages = selectedSubtitleLanguages();
     const downloadVideo = shouldDownloadVideo();
@@ -2070,6 +2628,8 @@ async function stopCurrentRun() {
 dialogueStopButton.addEventListener("click", stopCurrentRun);
 processingStopButton.addEventListener("click", stopCurrentRun);
 converterStopButton.addEventListener("click", stopCurrentRun);
+audioVideoStopButton.addEventListener("click", stopCurrentRun);
+mergerStopButton.addEventListener("click", stopCurrentRun);
 transcribeStopButton.addEventListener("click", stopCurrentRun);
 playerStopButton.addEventListener("click", stopCurrentRun);
 grabberStopButton.addEventListener("click", stopCurrentRun);
@@ -2102,6 +2662,8 @@ setActiveWorkflow(activeWorkflow);
 setStatus(currentStatus);
 updateSpeed(slowSpeed.value);
 updateConvertMode(convertMode);
+updateAudioVideoResolution(audioVideoResolution);
+updateAudioVideoBackground(audioVideoBackground);
 updatePlayerOffset(playerOffsetInput.value);
 void loadWhisperModels();
 invoke<string>("get_default_grab_output_dir")
