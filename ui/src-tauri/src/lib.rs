@@ -11,6 +11,7 @@
 mod convert;
 mod dialogue;
 mod events;
+mod export;
 mod gallery;
 mod grabber;
 mod media;
@@ -27,6 +28,7 @@ use tauri::{AppHandle, State};
 use convert::{output_path_for_convert, run_convert, ConvertOptions};
 use dialogue::{output_path_for, run_conversion, ConversionOptions};
 use events::{emit_log, emit_status, RuntimeStatus};
+use export::{output_path_for_export, run_export, ExportOptions};
 use gallery::{list_material_videos_inner, MaterialGalleryOptions, MaterialVideo};
 use grabber::{
     default_grab_output_dir, probe_grab_inner, run_grab, subtitle_language_spec, GrabMetadata,
@@ -125,6 +127,25 @@ fn start_transcribe(
         "Transcription files are ready",
         output_path,
         move |app, state| run_transcribe(app, state, &options, &base_name),
+    )
+}
+
+#[tauri::command]
+fn start_dialogue_export(
+    app: AppHandle,
+    state: State<'_, ConversionState>,
+    options: ExportOptions,
+) -> Result<String, String> {
+    let video_path = existing_file(&options.video_path)?;
+    let output_path = output_path_for_export(&video_path)?;
+    let worker_output = output_path.clone();
+    start_background_job(
+        app,
+        &state,
+        "Checking media tools",
+        "Dialogue cut is ready",
+        output_path,
+        move |app, state| run_export(app, state, &options, &worker_output),
     )
 }
 
@@ -319,6 +340,7 @@ pub fn run() {
             read_subtitle_file,
             load_cue_ignores,
             save_cue_ignores,
+            start_dialogue_export,
             probe_grab,
             start_grab,
             stop_conversion

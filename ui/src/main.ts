@@ -23,9 +23,15 @@ import {
   createIcons,
 } from "lucide";
 
-// Workflows that run backend jobs and report status/output into a run block.
-type JobWorkflow = "dialogue" | "processing" | "converter" | "transcribe" | "grabber";
-type Workflow = JobWorkflow | "player";
+type Workflow =
+  | "dialogue"
+  | "processing"
+  | "converter"
+  | "transcribe"
+  | "player"
+  | "grabber";
+// Since the player gained the dialogue-cut export it runs jobs like the rest.
+type JobWorkflow = Workflow;
 
 type ConversionStatus = {
   status: "idle" | "running" | "complete" | "error";
@@ -118,8 +124,11 @@ const workflowPhases: Record<Workflow, readonly (readonly [string, string])[]> =
     ["download", "Download material"],
     ["subtitles", "Save subtitles"],
   ],
-  // The player is interactive; it has no pipeline.
-  player: [],
+  player: [
+    ["setup", "Prepare tools"],
+    ["render", "Render dialogue cut"],
+    ["subtitles", "Write subtitles"],
+  ],
 };
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
@@ -552,6 +561,30 @@ app.innerHTML = `
           </div>
         </section>
 
+        <section class="section-block run-block">
+          <div class="section-heading compact">
+            <div>
+              <span class="eyebrow">Run</span>
+              <h2 id="player-run-message">Review the cues, then create the cut</h2>
+            </div>
+          </div>
+          <div class="action-row">
+            <button id="player-start-button" class="primary-button" type="button">
+              <i data-lucide="play"></i>
+              <span>Create dialogue cut</span>
+            </button>
+            <button id="player-stop-button" class="secondary-button" type="button" disabled>
+              <i data-lucide="square"></i>
+              <span>Cancel</span>
+            </button>
+          </div>
+          <div id="player-progress" class="progress-track" hidden>
+            <span id="player-progress-fill"></span>
+          </div>
+          <p id="player-progress-detail" class="field-note"></p>
+          <p id="player-output-path" class="output-path"></p>
+        </section>
+
         <section class="section-block">
           <div class="section-heading">
             <div>
@@ -705,6 +738,7 @@ const workflowRunMessages: Record<JobWorkflow, HTMLElement> = {
   processing: byId("processing-run-message"),
   converter: byId("converter-run-message"),
   transcribe: byId("transcribe-run-message"),
+  player: byId("player-run-message"),
   grabber: byId("grabber-run-message"),
 };
 const workflowOutputPaths: Record<JobWorkflow, HTMLElement> = {
@@ -712,6 +746,7 @@ const workflowOutputPaths: Record<JobWorkflow, HTMLElement> = {
   processing: byId("processing-output-path"),
   converter: byId("converter-output-path"),
   transcribe: byId("transcribe-output-path"),
+  player: byId("player-output-path"),
   grabber: byId("grabber-output-path"),
 };
 
@@ -758,6 +793,8 @@ const playerReplayCue = byId<HTMLButtonElement>("player-replay-cue");
 const playerNextCue = byId<HTMLButtonElement>("player-next-cue");
 const playerCueCount = byId<HTMLElement>("player-cue-count");
 const playerCueList = byId<HTMLElement>("player-cues");
+const playerStartButton = byId<HTMLButtonElement>("player-start-button");
+const playerStopButton = byId<HTMLButtonElement>("player-stop-button");
 const offsetPresetButtons = Array.from(
   document.querySelectorAll<HTMLButtonElement>(".offset-preset"),
 );
@@ -783,6 +820,11 @@ const workflowProgress: Partial<Record<Workflow, ProgressElements>> = {
     track: byId("transcribe-progress"),
     fill: byId("transcribe-progress-fill"),
     detail: byId("transcribe-progress-detail"),
+  },
+  player: {
+    track: byId("player-progress"),
+    fill: byId("player-progress-fill"),
+    detail: byId("player-progress-detail"),
   },
 };
 const grabberMetadataSection = document.querySelector<HTMLElement>("#grabber-metadata-section")!;
@@ -867,10 +909,12 @@ function setRunControls(running: boolean) {
   processingStartButton.disabled = running;
   converterStartButton.disabled = running;
   transcribeStartButton.disabled = running;
+  playerStartButton.disabled = running;
   dialogueStopButton.disabled = !running;
   processingStopButton.disabled = !running;
   converterStopButton.disabled = !running;
   transcribeStopButton.disabled = !running;
+  playerStopButton.disabled = !running;
   grabberStopButton.disabled = !running;
   dialogueBrowseButton.disabled = running;
   processingBrowseButton.disabled = running;
@@ -900,11 +944,9 @@ function setStatus(status: ConversionStatus) {
           ? "Running"
           : "Ready";
 
-  if (workflow !== "player") {
-    workflowRunMessages[workflow].textContent = status.message;
-    workflowOutputPaths[workflow].textContent =
-      status.outputPath ?? (workflow === "grabber" ? grabOutputDir.value.trim() : "");
-  }
+  workflowRunMessages[workflow].textContent = status.message;
+  workflowOutputPaths[workflow].textContent =
+    status.outputPath ?? (workflow === "grabber" ? grabOutputDir.value.trim() : "");
   if (!running) {
     resetRunProgress();
   }
@@ -1697,31 +1739,66 @@ function setActivePlayerCue(index: number) {
   }
 }
 
-// Mirrors dialogue-only playback: each cue plays from (start - offset) to its
-// end, and gaps short enough to play through are counted as watched time.
-function dialogueOnlyDuration(): number {
-  let total = 0;
-  let rangeStart = -1;
-  let rangeEnd = -1;
+type ExportPlan = {
+  ranges: { start: number; end: number }[];
+  // Kept cues retimed to the cut's compressed timeline.
+  cues: SubtitleCue[];
+  totalSeconds: number;
+};
+
+// Mirrors dialogue-only playback: each kept cue plays from (start - offset)
+// to its end, and gaps short enough to play through are included. The same
+// plan drives the runtime estimate and the exported cut.
+function buildExportPlan(): ExportPlan {
+  const ranges: { start: number; end: number }[] = [];
+  const cues: SubtitleCue[] = [];
+  let elapsedBefore = 0;
   for (const cue of playerCues) {
     if (isCueIgnored(cue)) {
       continue;
     }
     const start = Math.max(0, cue.start - playerOffset);
-    if (rangeEnd >= 0 && start <= rangeEnd + 0.35) {
-      rangeEnd = Math.max(rangeEnd, cue.end);
+    let range = ranges[ranges.length - 1];
+    if (range && start <= range.end + 0.35) {
+      range.end = Math.max(range.end, cue.end);
     } else {
-      if (rangeEnd >= 0) {
-        total += rangeEnd - rangeStart;
+      if (range) {
+        elapsedBefore += range.end - range.start;
       }
-      rangeStart = start;
-      rangeEnd = cue.end;
+      range = { start, end: cue.end };
+      ranges.push(range);
     }
+    cues.push({
+      start: elapsedBefore + (cue.start - range.start),
+      end: elapsedBefore + (cue.end - range.start),
+      text: cue.text,
+    });
   }
-  if (rangeEnd >= 0) {
-    total += rangeEnd - rangeStart;
-  }
-  return total;
+  const last = ranges[ranges.length - 1];
+  const totalSeconds = elapsedBefore + (last ? last.end - last.start : 0);
+  return { ranges, cues, totalSeconds };
+}
+
+function dialogueOnlyDuration(): number {
+  return buildExportPlan().totalSeconds;
+}
+
+function srtTimestamp(seconds: number): string {
+  const total = Math.max(0, seconds);
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const secs = Math.floor(total % 60);
+  const millis = Math.round((total - Math.floor(total)) * 1000);
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")},${String(millis).padStart(3, "0")}`;
+}
+
+function buildExportSrt(cues: SubtitleCue[]): string {
+  return cues
+    .map(
+      (cue, index) =>
+        `${index + 1}\n${srtTimestamp(cue.start)} --> ${srtTimestamp(cue.end)}\n${cue.text}\n`,
+    )
+    .join("\n");
 }
 
 function updatePlayerSummary() {
@@ -1993,7 +2070,26 @@ dialogueStopButton.addEventListener("click", stopCurrentRun);
 processingStopButton.addEventListener("click", stopCurrentRun);
 converterStopButton.addEventListener("click", stopCurrentRun);
 transcribeStopButton.addEventListener("click", stopCurrentRun);
+playerStopButton.addEventListener("click", stopCurrentRun);
 grabberStopButton.addEventListener("click", stopCurrentRun);
+
+playerStartButton.addEventListener("click", () => {
+  const videoPath = playerVideoPath.value.trim();
+  const plan = buildExportPlan();
+  if (!videoPath || plan.ranges.length === 0) {
+    setStatus({
+      status: "error",
+      phase: "error",
+      message: "Load a video and subtitles before creating a cut",
+    });
+    return;
+  }
+  void startRun("player", "start_dialogue_export", {
+    videoPath,
+    ranges: plan.ranges,
+    subtitles: buildExportSrt(plan.cues),
+  });
+});
 
 listen<ConversionLog>("conversion-log", ({ payload }) => appendLog(payload));
 listen<ConversionProgress>("conversion-progress", ({ payload }) =>
