@@ -24,7 +24,12 @@ mod runtime;
 mod slowdown;
 mod transcribe;
 
-use std::{fs, path::PathBuf, sync::atomic::Ordering};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+    sync::atomic::Ordering,
+};
 use tauri::{AppHandle, State};
 
 use audio_video::{output_path_for_audio_video, run_audio_video, AudioVideoOptions};
@@ -34,8 +39,9 @@ use events::{emit_log, emit_status, RuntimeStatus};
 use export::{output_path_for_export, run_export, ExportOptions};
 use gallery::{list_material_videos_inner, MaterialGalleryOptions, MaterialVideo};
 use grabber::{
-    default_grab_output_dir, probe_grab_inner, run_grab, subtitle_language_spec, GrabMetadata,
-    GrabOptions, GrabProbeOptions,
+    default_grab_output_dir, delete_grab_text_file_inner, list_grab_text_files_inner,
+    probe_grab_inner, read_grab_text_file_inner, run_grab, subtitle_language_spec, GrabMetadata,
+    GrabOptions, GrabProbeOptions, GrabTextFile,
 };
 use merge::{output_path_for_merge, run_merge, validated_video_paths, MergeOptions};
 use player::{
@@ -44,13 +50,13 @@ use player::{
 use process::{
     existing_file, set_child_pid, start_background_job, terminate_process, ConversionState,
 };
+use runtime::probe_processor_paths;
 use runtime::runtime_status_inner;
 use slowdown::{output_path_for_slowdown, run_slowdown, SlowdownOptions};
-use runtime::probe_processor_paths;
 use transcribe::{
     delete_model, list_models, model_cache_dir, normalized_formats, run_model_download,
-    run_transcribe, transcript_base_name, validated_model, ModelDownloadOptions,
-    TranscribeOptions, WhisperModelInfo,
+    run_transcribe, transcript_base_name, validated_model, ModelDownloadOptions, TranscribeOptions,
+    WhisperModelInfo,
 };
 
 #[tauri::command]
@@ -237,6 +243,54 @@ fn serve_media(options: ServeMediaOptions) -> Result<String, String> {
     media_server::serve_media(std::path::Path::new(options.path.trim()))
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenDirectoryOptions {
+    path: String,
+}
+
+#[tauri::command]
+fn open_directory(options: OpenDirectoryOptions) -> Result<(), String> {
+    let raw_path = options.path.trim();
+    if raw_path.is_empty() {
+        return Err("Choose an output folder first.".into());
+    }
+
+    let directory = PathBuf::from(raw_path);
+    let metadata = fs::metadata(&directory)
+        .map_err(|error| format!("Could not open {}: {error}", directory.display()))?;
+    if !metadata.is_dir() {
+        return Err(format!("{} is not a folder.", directory.display()));
+    }
+
+    open_directory_in_file_manager(&directory)
+}
+
+fn open_directory_in_file_manager(directory: &Path) -> Result<(), String> {
+    let result = {
+        #[cfg(target_os = "macos")]
+        {
+            Command::new("open").arg(directory).status()
+        }
+        #[cfg(target_os = "windows")]
+        {
+            Command::new("explorer").arg(directory).status()
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            Command::new("xdg-open").arg(directory).status()
+        }
+    };
+
+    let status =
+        result.map_err(|error| format!("Could not open {}: {error}", directory.display()))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("Could not open {}.", directory.display()))
+    }
+}
+
 #[tauri::command]
 fn list_subtitle_files(options: SubtitleListOptions) -> Vec<SubtitleFile> {
     player::list_subtitle_files(std::path::Path::new(options.video_path.trim()))
@@ -254,7 +308,10 @@ fn load_cue_ignores(options: IgnoreLoadOptions) -> Result<Vec<String>, String> {
 
 #[tauri::command]
 fn save_cue_ignores(options: IgnoreSaveOptions) -> Result<(), String> {
-    player::save_cue_ignores(std::path::Path::new(options.subtitle_path.trim()), &options.keys)
+    player::save_cue_ignores(
+        std::path::Path::new(options.subtitle_path.trim()),
+        &options.keys,
+    )
 }
 
 #[tauri::command]
@@ -277,6 +334,39 @@ fn list_material_videos(
         PathBuf::from(options.directory.trim())
     };
     list_material_videos_inner(&app, &state, &directory)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GrabTextListOptions {
+    directory: String,
+    url: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GrabTextReadOptions {
+    path: String,
+}
+
+#[tauri::command]
+fn list_grab_text_files(options: GrabTextListOptions) -> Result<Vec<GrabTextFile>, String> {
+    let directory = if options.directory.trim().is_empty() {
+        default_grab_output_dir()
+    } else {
+        PathBuf::from(options.directory.trim())
+    };
+    list_grab_text_files_inner(&directory, options.url.as_deref())
+}
+
+#[tauri::command]
+fn read_grab_text_file(options: GrabTextReadOptions) -> Result<String, String> {
+    read_grab_text_file_inner(std::path::Path::new(options.path.trim()))
+}
+
+#[tauri::command]
+fn delete_grab_text_file(options: GrabTextReadOptions) -> Result<(), String> {
+    delete_grab_text_file_inner(std::path::Path::new(options.path.trim()))
 }
 
 #[tauri::command]
@@ -324,10 +414,11 @@ fn start_grab(
     if !(url.starts_with("https://") || url.starts_with("http://")) {
         return Err("Enter a valid http or https URL first.".into());
     }
-    if !options.download_video && !options.download_subtitles {
-        return Err("Choose video, subtitles, or both.".into());
+    if !options.download_video && !options.download_subtitles && !options.download_json3_subtitles {
+        return Err("Choose video, subtitles, or JSON3 captions.".into());
     }
-    if options.download_subtitles && subtitle_language_spec(&options.subtitle_languages).is_empty()
+    if (options.download_subtitles || options.download_json3_subtitles)
+        && subtitle_language_spec(&options.subtitle_languages).is_empty()
     {
         return Err("Choose at least one subtitle track.".into());
     }
@@ -369,7 +460,11 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_runtime_status,
             get_default_grab_output_dir,
+            open_directory,
             list_material_videos,
+            list_grab_text_files,
+            read_grab_text_file,
+            delete_grab_text_file,
             start_conversion,
             start_slowdown,
             start_convert,

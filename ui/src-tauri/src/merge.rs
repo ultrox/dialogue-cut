@@ -199,6 +199,8 @@ pub(crate) fn run_merge(
         .args(["-profile:v", "high"])
         .args(["-c:a", "aac"])
         .args(["-b:a", "192k"])
+        .args(["-ac", "2"])
+        .args(["-ar", "48000"])
         .args(["-movflags", "+faststart"])
         .arg(output_path);
     prepend_media_path(&mut command, &paths);

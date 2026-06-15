@@ -48,6 +48,36 @@ fn phase_for_line(line: &str) -> Option<(&'static str, &'static str)> {
     }
 }
 
+fn nicer_tool_error(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if trimmed.contains("HTTP Error 429") {
+        return Some(
+            "YouTube is rate-limiting subtitle downloads right now (HTTP 429). Try again later, or uncheck subtitles and download the video only."
+                .into(),
+        );
+    }
+
+    trimmed
+        .strip_prefix("ERROR: ")
+        .or_else(|| trimmed.strip_prefix("error: "))
+        .map(str::trim)
+        .filter(|message| !message.is_empty())
+        .map(ToString::to_string)
+}
+
+fn generic_process_error(status: std::process::ExitStatus) -> String {
+    match status.code() {
+        Some(code) => {
+            format!("The external tool failed with exit code {code}. Check the log for details.")
+        }
+        None => "The external tool was terminated before it finished.".into(),
+    }
+}
+
 fn forward_logs<R: Read + Send + 'static>(
     app: AppHandle,
     reader: R,
@@ -63,6 +93,29 @@ fn forward_logs<R: Read + Send + 'static>(
             }
             emit_log(&app, stream, line);
         }
+    })
+}
+
+fn forward_logs_with_error_capture<R: Read + Send + 'static>(
+    app: AppHandle,
+    reader: R,
+    stream: &'static str,
+    detect_phases: bool,
+) -> thread::JoinHandle<Option<String>> {
+    thread::spawn(move || {
+        let mut last_error = None;
+        for line in BufReader::new(reader).lines().map_while(Result::ok) {
+            if detect_phases {
+                if let Some((phase, message)) = phase_for_line(&line) {
+                    emit_status(&app, "running", phase, message, None);
+                }
+            }
+            if let Some(error) = nicer_tool_error(&line) {
+                last_error = Some(error);
+            }
+            emit_log(&app, stream, line);
+        }
+        last_error
     })
 }
 
@@ -160,14 +213,48 @@ fn run_logged_command_with(
     command: &mut Command,
     detect_phases: bool,
 ) -> Result<(), String> {
+    if state.cancel_requested.load(Ordering::SeqCst) {
+        return Err("Conversion cancelled.".into());
+    }
+
+    prepare_process(command);
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("Could not launch process: {error}"))?;
+    set_child_pid(state, Some(child.id()))?;
+
     let app_stdout = app.clone();
     let app_stderr = app.clone();
-    run_with_stream_handlers(
-        state,
-        command,
-        move |stdout| forward_logs(app_stdout, stdout, "stdout", detect_phases),
-        move |stderr| forward_logs(app_stderr, stderr, "stderr", detect_phases),
-    )
+    let stdout_thread = child
+        .stdout
+        .take()
+        .map(|stdout| forward_logs_with_error_capture(app_stdout, stdout, "stdout", detect_phases));
+    let stderr_thread = child
+        .stderr
+        .take()
+        .map(|stderr| forward_logs_with_error_capture(app_stderr, stderr, "stderr", detect_phases));
+
+    let result = child.wait();
+    let stdout_error = stdout_thread
+        .and_then(|handle| handle.join().ok())
+        .flatten();
+    let stderr_error = stderr_thread
+        .and_then(|handle| handle.join().ok())
+        .flatten();
+    set_child_pid(state, None)?;
+
+    if state.cancel_requested.load(Ordering::SeqCst) {
+        return Err("Conversion cancelled.".into());
+    }
+
+    match result {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(stderr_error
+            .or(stdout_error)
+            .unwrap_or_else(|| generic_process_error(status))),
+        Err(error) => Err(format!("Could not wait for process: {error}")),
+    }
 }
 
 // Like run_logged_command_plain, but additionally calls `observer` with every
@@ -206,7 +293,12 @@ pub(crate) fn run_logged_command_observed(
 
 pub(crate) fn format_clock(seconds: f64) -> String {
     let total = seconds.max(0.0).round() as u64;
-    format!("{}:{:02}:{:02}", total / 3600, (total % 3600) / 60, total % 60)
+    format!(
+        "{}:{:02}:{:02}",
+        total / 3600,
+        (total % 3600) / 60,
+        total % 60
+    )
 }
 
 // Runs an ffmpeg command that was given `-nostats -progress pipe:1`. Progress
@@ -334,7 +426,13 @@ pub(crate) fn start_background_job(
         let _ = set_child_pid(&state, None);
 
         match result {
-            Ok(()) => emit_status(&app, "complete", "complete", done_message, Some(&output_path)),
+            Ok(()) => emit_status(
+                &app,
+                "complete",
+                "complete",
+                done_message,
+                Some(&output_path),
+            ),
             Err(error) => {
                 emit_log(&app, "stderr", &error);
                 emit_status(&app, "error", "error", &error, Some(&output_path));

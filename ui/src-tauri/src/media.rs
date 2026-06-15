@@ -72,6 +72,22 @@ impl MediaProbe {
         )
         .is_some()
     }
+
+    pub(crate) fn audio_codec(&self, target: &Path) -> Option<String> {
+        self.entry(
+            target,
+            &["-select_streams", "a:0", "-show_entries", "stream=codec_name"],
+        )
+    }
+
+    pub(crate) fn audio_channels(&self, target: &Path) -> Option<u32> {
+        self.entry(
+            target,
+            &["-select_streams", "a:0", "-show_entries", "stream=channels"],
+        )?
+        .parse()
+        .ok()
+    }
 }
 
 /// Fluent wrapper around the bundled ffmpeg. Centralizes the shared plumbing
@@ -179,7 +195,11 @@ impl<'a> Ffmpeg<'a> {
     }
 
     pub(crate) fn aac_audio(mut self) -> Self {
-        self.command.args(["-c:a", "aac"]).args(["-b:a", "192k"]);
+        self.command
+            .args(["-c:a", "aac"])
+            .args(["-b:a", "192k"])
+            .args(["-ac", "2"])
+            .args(["-ar", "48000"]);
         self
     }
 

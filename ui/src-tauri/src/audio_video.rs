@@ -140,6 +140,8 @@ pub(crate) fn run_audio_video(
         .args(["-profile:v", "high"])
         .args(["-c:a", "aac"])
         .args(["-b:a", "192k"])
+        .args(["-ac", "2"])
+        .args(["-ar", "48000"])
         .arg("-shortest")
         .args(["-movflags", "+faststart"])
         .arg(output_path);

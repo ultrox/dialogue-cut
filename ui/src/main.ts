@@ -7,6 +7,8 @@ import {
   ArrowUp,
   Captions,
   CheckCircle2,
+  Copy,
+  ExternalLink,
   Circle,
   FileText,
   Film,
@@ -23,6 +25,7 @@ import {
   SkipBack,
   SkipForward,
   Square,
+  Target,
   Terminal,
   Trash2,
   createIcons,
@@ -99,6 +102,16 @@ type MaterialVideo = {
   thumbnailDataUrl?: string;
 };
 
+type GrabTextFileEntry = {
+  path: string;
+  fileName: string;
+  folderName: string;
+  sizeBytes?: number;
+  modified?: number;
+};
+
+type GrabMetadataView = "download" | "preview";
+
 const workflowPhases: Record<Workflow, readonly (readonly [string, string])[]> = {
   dialogue: [
     ["setup", "Prepare runtime"],
@@ -159,6 +172,13 @@ let currentStatus: ConversionStatus = {
 };
 let grabMetadata: GrabMetadata | null = null;
 let materialGalleryLoadId = 0;
+let grabContentLoadId = 0;
+let grabTextFiles: GrabTextFileEntry[] = [];
+let currentGrabContentText = "";
+let currentGrabContentUrl = "";
+let grabMetadataView: GrabMetadataView = "download";
+let pendingGrabDeletePath = "";
+let pendingGrabDeleteTimer: number | undefined;
 let mergeVideoPaths: string[] = [];
 
 app.innerHTML = `
@@ -823,10 +843,13 @@ app.innerHTML = `
               <span>Output settings</span>
             </summary>
             <div class="settings-details-body">
-              <div class="file-row">
+              <div class="file-row folder-action-row">
                 <input id="grab-output-dir" type="text" placeholder="/path/to/material" spellcheck="false" />
                 <button id="grab-output-browse-button" class="icon-button" type="button" title="Choose folder">
-                  <i data-lucide="folder-open"></i>
+                  <i data-lucide="target"></i>
+                </button>
+                <button id="grab-output-open-button" class="icon-button" type="button" title="Open output folder">
+                  <i data-lucide="external-link"></i>
                 </button>
               </div>
               <p id="grabber-output-path" class="output-path"></p>
@@ -843,14 +866,66 @@ app.innerHTML = `
             <i data-lucide="settings-2"></i>
           </div>
           <p id="grabber-meta-line" class="meta-line"></p>
-          <div class="metadata-grid">
-            <label>
-              <span>Video quality</span>
-              <select id="grab-quality"></select>
-            </label>
-            <div>
-              <span class="field-label">Subtitle tracks</span>
-              <div id="grab-subtitle-options" class="subtitle-options"></div>
+          <div class="metadata-view-tabs" role="tablist" aria-label="Grabber result views">
+            <button id="grabber-download-view-button" class="metadata-view-tab active" type="button" role="tab" aria-selected="true" aria-controls="grabber-download-view">
+              <i data-lucide="hard-drive-download"></i>
+              <span>Download</span>
+            </button>
+            <button id="grabber-preview-view-button" class="metadata-view-tab" type="button" role="tab" aria-selected="false" aria-controls="grabber-preview-view" disabled title="Download subtitles first">
+              <i data-lucide="file-text"></i>
+              <span>Preview</span>
+            </button>
+          </div>
+          <div id="grabber-download-view" class="metadata-view-panel">
+            <div class="metadata-grid">
+              <div>
+                <span class="field-label">Video</span>
+                <label class="checkbox-label grab-download-option">
+                  <input id="grab-download-video" type="checkbox" checked />
+                  <span>Download video</span>
+                </label>
+                <label>
+                  <span>Video quality</span>
+                  <select id="grab-quality"></select>
+                </label>
+              </div>
+              <div>
+                <span class="field-label">Subtitle tracks</span>
+                <div id="grab-subtitle-options" class="subtitle-options"></div>
+                <div class="grab-subtitle-format-options">
+                  <span class="field-label">Subtitle files</span>
+                  <label class="checkbox-label">
+                    <input id="grab-srt" type="checkbox" checked />
+                    <span>Download SRT</span>
+                  </label>
+                  <label class="checkbox-label">
+                    <input id="grab-json3" type="checkbox" />
+                    <span>Download JSON3</span>
+                  </label>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div id="grabber-preview-view" class="metadata-view-panel" hidden>
+            <div id="grabber-content-section" class="content-preview-block" hidden>
+              <div class="content-preview-header">
+                <span class="field-label">Downloaded text</span>
+              </div>
+              <div class="content-toolbar">
+                <select id="grab-content-file"></select>
+                <button id="grab-content-refresh-button" class="icon-button" type="button" title="Refresh content">
+                  <i data-lucide="refresh-cw"></i>
+                </button>
+                <button id="grab-content-delete-button" class="icon-button danger-button" type="button" title="Delete selected file" disabled>
+                  <i data-lucide="trash-2"></i>
+                </button>
+                <button id="grab-content-copy-button" class="secondary-button" type="button" disabled>
+                  <i data-lucide="copy"></i>
+                  <span>Copy</span>
+                </button>
+              </div>
+              <p id="grab-content-path" class="output-path"></p>
+              <pre id="grab-content-preview" class="content-preview">No downloaded text files.</pre>
             </div>
           </div>
         </section>
@@ -884,7 +959,9 @@ createIcons({
     ArrowUp,
     Captions,
     CheckCircle2,
+    Copy,
     Circle,
+    ExternalLink,
     FileText,
     Film,
     FolderOpen,
@@ -900,6 +977,7 @@ createIcons({
     SkipBack,
     SkipForward,
     Square,
+    Target,
     Terminal,
     Trash2,
   },
@@ -969,6 +1047,11 @@ const mergerClearButton = byId<HTMLButtonElement>("merger-clear-button");
 const mergerOutputBrowseButton = byId<HTMLButtonElement>("merger-output-browse-button");
 const transcribeBrowseButton = byId<HTMLButtonElement>("transcribe-browse-button");
 const grabOutputBrowseButton = byId<HTMLButtonElement>("grab-output-browse-button");
+const grabOutputOpenButton = byId<HTMLButtonElement>("grab-output-open-button");
+const grabContentFileSelect = byId<HTMLSelectElement>("grab-content-file");
+const grabContentRefreshButton = byId<HTMLButtonElement>("grab-content-refresh-button");
+const grabContentDeleteButton = byId<HTMLButtonElement>("grab-content-delete-button");
+const grabContentCopyButton = byId<HTMLButtonElement>("grab-content-copy-button");
 const dialogueStartButton = byId<HTMLButtonElement>("dialogue-start-button");
 const processingStartButton = byId<HTMLButtonElement>("processing-start-button");
 const converterStartButton = byId<HTMLButtonElement>("converter-start-button");
@@ -1050,10 +1133,20 @@ const workflowProgress: Partial<Record<Workflow, ProgressElements>> = {
   },
 };
 const grabberMetadataSection = document.querySelector<HTMLElement>("#grabber-metadata-section")!;
+const grabberDownloadViewButton = byId<HTMLButtonElement>("grabber-download-view-button");
+const grabberPreviewViewButton = byId<HTMLButtonElement>("grabber-preview-view-button");
+const grabberDownloadView = document.querySelector<HTMLElement>("#grabber-download-view")!;
+const grabberPreviewView = document.querySelector<HTMLElement>("#grabber-preview-view")!;
+const grabberContentSection = document.querySelector<HTMLElement>("#grabber-content-section")!;
 const grabberTitle = document.querySelector<HTMLElement>("#grabber-title")!;
 const grabberMetaLine = document.querySelector<HTMLElement>("#grabber-meta-line")!;
 const grabQuality = document.querySelector<HTMLSelectElement>("#grab-quality")!;
 const grabSubtitleOptions = document.querySelector<HTMLElement>("#grab-subtitle-options")!;
+const grabDownloadVideo = document.querySelector<HTMLInputElement>("#grab-download-video")!;
+const grabSrt = document.querySelector<HTMLInputElement>("#grab-srt")!;
+const grabJson3 = document.querySelector<HTMLInputElement>("#grab-json3")!;
+const grabContentPath = document.querySelector<HTMLElement>("#grab-content-path")!;
+const grabContentPreview = document.querySelector<HTMLElement>("#grab-content-preview")!;
 const statusChip = document.querySelector<HTMLElement>("#status-chip")!;
 const materialGallery = document.querySelector<HTMLElement>("#material-gallery")!;
 const mergerFileList = document.querySelector<HTMLElement>("#merger-file-list")!;
@@ -1077,8 +1170,8 @@ const audioVideoBackgroundButtons = Array.from(
 );
 
 const convertModeNotes: Record<string, string> = {
-  reencode: "Most compatible for editing. Re-encodes everything, so it takes a while.",
-  remux: "Copies the video stream into MP4 and converts audio to AAC. Fast, but editors may struggle with HEVC/AV1 sources.",
+  reencode: "Most compatible for editing. Re-encodes video and writes stereo AAC, so it takes a while.",
+  remux: "Copies the video stream into MP4 and writes stereo AAC. Fast, but editors may struggle with HEVC/AV1 sources.",
 };
 let convertMode = "reencode";
 let audioVideoResolution = "1920x1080";
@@ -1135,6 +1228,10 @@ function setActiveWorkflow(workflow: Workflow) {
   renderPhases();
 }
 
+function isProcessRunning(): boolean {
+  return currentStatus.status === "running";
+}
+
 function setRunControls(running: boolean) {
   dialogueStartButton.disabled = running;
   processingStartButton.disabled = running;
@@ -1167,6 +1264,12 @@ function setRunControls(running: boolean) {
   mergerOutputBrowseButton.disabled = running;
   transcribeBrowseButton.disabled = running;
   grabOutputBrowseButton.disabled = running;
+  grabOutputOpenButton.disabled = running || !grabOutputDir.value.trim();
+  grabContentRefreshButton.disabled = running || grabTextFiles.length === 0;
+  grabContentDeleteButton.disabled = running || grabTextFiles.length === 0;
+  grabContentFileSelect.disabled = running || grabTextFiles.length === 0;
+  grabContentCopyButton.disabled = running || !currentGrabContentText;
+  updateGrabMetadataViewState(running);
   materialRefreshButton.disabled = running;
   applyMergeControlState(running);
   applyGrabControlState(running);
@@ -1208,6 +1311,7 @@ function setStatus(status: ConversionStatus) {
   renderPhases();
   if (workflow === "grabber" && status.status === "complete" && status.message === "Material is ready") {
     void loadMaterialGallery();
+    void loadGrabContentFiles();
   }
   if (workflow === "transcribe" && status.status === "complete" && status.message === "Whisper model is ready") {
     void loadWhisperModels();
@@ -1266,6 +1370,12 @@ function appendLog(entry: ConversionLog) {
 function clearLog() {
   logLines.length = 0;
   logOutput.textContent = "";
+}
+
+function waitForVisibleUpdate(): Promise<void> {
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+  });
 }
 
 function setRuntimeStatus(status: RuntimeStatus) {
@@ -1383,6 +1493,258 @@ async function loadMaterialGallery() {
   }
 }
 
+function grabTextFileLabel(file: GrabTextFileEntry): string {
+  const extensionMatch = file.fileName.match(/\.([^.]+)$/);
+  const extension = extensionMatch?.[1]?.toLowerCase() ?? "txt";
+  const stem = extensionMatch ? file.fileName.slice(0, -extension.length - 1) : file.fileName;
+  let track = stem;
+  if (file.folderName && track.startsWith(file.folderName)) {
+    track = track.slice(file.folderName.length).replace(/^\.+/, "");
+  }
+  if (!track || track === stem) {
+    const pieces = stem.split(".").filter(Boolean);
+    track = pieces[pieces.length - 1] ?? stem;
+  }
+  track = track.replace(/\.(auto|manual)$/i, "-$1");
+
+  const subtitleTrack = grabMetadata?.subtitles.find((entry) => entry.language === track);
+  if (subtitleTrack?.hasAutomatic && !subtitleTrack.hasManual && !/-auto$/i.test(track)) {
+    track += "-auto";
+  } else if (subtitleTrack?.hasManual && !subtitleTrack.hasAutomatic && !/-manual$/i.test(track)) {
+    track += "-manual";
+  }
+
+  return track + "." + extension;
+}
+
+function updateGrabMetadataViewState(running = currentStatus.status === "running") {
+  const hasPreview = grabTextFiles.length > 0;
+  if (!hasPreview && grabMetadataView === "preview") {
+    grabMetadataView = "download";
+  }
+  const previewActive = grabMetadataView === "preview";
+  grabberDownloadViewButton.classList.toggle("active", !previewActive);
+  grabberPreviewViewButton.classList.toggle("active", previewActive);
+  grabberDownloadViewButton.setAttribute("aria-selected", String(!previewActive));
+  grabberPreviewViewButton.setAttribute("aria-selected", String(previewActive));
+  grabberDownloadView.hidden = previewActive;
+  grabberPreviewView.hidden = !previewActive;
+  grabberPreviewViewButton.disabled = running || !hasPreview;
+  grabberPreviewViewButton.title = hasPreview ? "Preview downloaded text" : "Download subtitles first";
+}
+
+function setGrabMetadataView(view: GrabMetadataView) {
+  if (view === "preview" && grabTextFiles.length === 0) {
+    return;
+  }
+  grabMetadataView = view;
+  updateGrabMetadataViewState();
+}
+
+function resetGrabPreviewScroll() {
+  grabContentPreview.scrollTop = 0;
+}
+
+function disarmGrabDeleteButton() {
+  pendingGrabDeletePath = "";
+  if (pendingGrabDeleteTimer !== undefined) {
+    window.clearTimeout(pendingGrabDeleteTimer);
+    pendingGrabDeleteTimer = undefined;
+  }
+  grabContentDeleteButton.classList.remove("confirm");
+  grabContentDeleteButton.title = "Delete selected file";
+}
+
+function armGrabDeleteButton(path: string) {
+  pendingGrabDeletePath = path;
+  grabContentDeleteButton.classList.add("confirm");
+  grabContentDeleteButton.title = "Click again to delete";
+  if (pendingGrabDeleteTimer !== undefined) {
+    window.clearTimeout(pendingGrabDeleteTimer);
+  }
+  pendingGrabDeleteTimer = window.setTimeout(disarmGrabDeleteButton, 2500);
+}
+
+function resetGrabContentPreview(hidden = true, message = "No downloaded text files for this URL.") {
+  grabContentLoadId += 1;
+  grabTextFiles = [];
+  currentGrabContentText = "";
+  currentGrabContentUrl = "";
+  grabMetadataView = "download";
+  disarmGrabDeleteButton();
+  grabberContentSection.hidden = hidden;
+  grabContentFileSelect.replaceChildren();
+  grabContentFileSelect.disabled = true;
+  grabContentCopyButton.disabled = true;
+  grabContentDeleteButton.disabled = true;
+  grabContentRefreshButton.disabled = true;
+  grabContentPath.textContent = "";
+  grabContentPreview.textContent = message;
+  resetGrabPreviewScroll();
+  updateGrabMetadataViewState();
+}
+
+function setGrabContentEmpty(message: string, hidden = true) {
+  currentGrabContentText = "";
+  grabTextFiles = [];
+  disarmGrabDeleteButton();
+  if (hidden) {
+    grabMetadataView = "download";
+  }
+  grabberContentSection.hidden = hidden;
+  grabContentFileSelect.replaceChildren();
+  grabContentFileSelect.disabled = true;
+  grabContentCopyButton.disabled = true;
+  grabContentDeleteButton.disabled = true;
+  grabContentRefreshButton.disabled = true;
+  grabContentPath.textContent = "";
+  grabContentPreview.textContent = message;
+  resetGrabPreviewScroll();
+  updateGrabMetadataViewState();
+}
+
+function renderGrabContentFiles(files: GrabTextFileEntry[], selectedPath?: string) {
+  grabTextFiles = files;
+  if (files.length === 0) {
+    setGrabContentEmpty("No downloaded text files for this URL.");
+    return;
+  }
+  grabberContentSection.hidden = false;
+
+  const selected = files.find((file) => file.path === selectedPath) ?? files[0];
+  grabContentFileSelect.replaceChildren(
+    ...files.map((file) => {
+      const option = document.createElement("option");
+      option.value = file.path;
+      option.textContent = grabTextFileLabel(file);
+      return option;
+    }),
+  );
+  grabContentFileSelect.value = selected.path;
+  grabContentFileSelect.disabled = currentStatus.status === "running";
+  grabContentRefreshButton.disabled = currentStatus.status === "running";
+  grabContentDeleteButton.disabled = currentStatus.status === "running";
+  setGrabMetadataView("preview");
+  void previewGrabContentFile(selected.path);
+}
+
+async function loadGrabContentFiles(preferredPath = grabContentFileSelect.value) {
+  if (currentStatus.status === "running") {
+    return;
+  }
+  const url = grabUrl.value.trim();
+  if (!url) {
+    resetGrabContentPreview(true);
+    return;
+  }
+  const loadId = ++grabContentLoadId;
+  currentGrabContentUrl = url;
+  const wasVisible = grabMetadataView === "preview" && !grabberContentSection.hidden;
+  grabContentRefreshButton.disabled = true;
+  if (wasVisible) {
+    grabContentPreview.textContent = "Loading text files...";
+    resetGrabPreviewScroll();
+  }
+
+  try {
+    const files = await invoke<GrabTextFileEntry[]>("list_grab_text_files", {
+      options: {
+        directory: grabOutputDir.value.trim(),
+        url,
+      },
+    });
+    if (loadId === grabContentLoadId && currentGrabContentUrl === url) {
+      renderGrabContentFiles(files, preferredPath);
+    }
+  } catch (error) {
+    if (loadId === grabContentLoadId && currentGrabContentUrl === url) {
+      setGrabContentEmpty(String(error), false);
+    }
+  } finally {
+    if (loadId === grabContentLoadId && currentGrabContentUrl === url) {
+      grabContentRefreshButton.disabled = grabTextFiles.length === 0;
+      grabContentDeleteButton.disabled = grabTextFiles.length === 0;
+      setRunControls(isProcessRunning());
+    }
+  }
+}
+
+async function previewGrabContentFile(path: string) {
+  const file = grabTextFiles.find((entry) => entry.path === path);
+  if (!file) {
+    setGrabContentEmpty("No downloaded text files for this URL.");
+    return;
+  }
+  disarmGrabDeleteButton();
+  grabContentPath.textContent = path;
+  grabContentCopyButton.disabled = true;
+  try {
+    const content = await invoke<string>("read_grab_text_file", { options: { path } });
+    currentGrabContentText = content;
+    grabContentPreview.textContent = content || "(empty file)";
+    resetGrabPreviewScroll();
+    grabContentCopyButton.disabled = currentStatus.status === "running" || !content;
+  } catch (error) {
+    currentGrabContentText = "";
+    grabContentPreview.textContent = String(error);
+    resetGrabPreviewScroll();
+    grabContentCopyButton.disabled = true;
+  }
+}
+
+async function copyGrabContent() {
+  disarmGrabDeleteButton();
+  if (!currentGrabContentText) {
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(currentGrabContentText);
+  } catch {
+    const textarea = document.createElement("textarea");
+    textarea.value = currentGrabContentText;
+    textarea.style.position = "fixed";
+    textarea.style.opacity = "0";
+    document.body.append(textarea);
+    textarea.select();
+    document.execCommand("copy");
+    textarea.remove();
+  }
+  grabContentCopyButton.querySelector("span")!.textContent = "Copied";
+  window.setTimeout(() => {
+    grabContentCopyButton.querySelector("span")!.textContent = "Copy";
+  }, 1200);
+}
+
+async function deleteGrabContentFile() {
+  const path = grabContentFileSelect.value;
+  const file = grabTextFiles.find((entry) => entry.path === path);
+  if (!file || currentStatus.status === "running") {
+    return;
+  }
+  if (pendingGrabDeletePath !== path) {
+    armGrabDeleteButton(path);
+    return;
+  }
+
+  disarmGrabDeleteButton();
+  grabContentDeleteButton.disabled = true;
+  try {
+    await invoke("delete_grab_text_file", { options: { path } });
+    const nextFile = grabTextFiles.find((entry) => entry.path !== path);
+    await loadGrabContentFiles(nextFile?.path ?? "");
+  } catch (error) {
+    grabContentPreview.textContent = String(error);
+    resetGrabPreviewScroll();
+    setStatus({
+      status: "error",
+      phase: "error",
+      message: String(error),
+    });
+  } finally {
+    setRunControls(isProcessRunning());
+  }
+}
+
 function selectedSubtitleLanguages(): string[] {
   return Array.from(
     grabSubtitleOptions.querySelectorAll<HTMLInputElement>("input[type='checkbox']:checked"),
@@ -1392,21 +1754,41 @@ function selectedSubtitleLanguages(): string[] {
 }
 
 function shouldDownloadVideo(): boolean {
-  return grabQuality.value !== "none";
+  return grabDownloadVideo.checked;
+}
+
+function shouldDownloadSrt(): boolean {
+  return grabSrt.checked && selectedSubtitleLanguages().length > 0;
+}
+
+function shouldDownloadJson3(): boolean {
+  return grabJson3.checked && selectedSubtitleLanguages().length > 0;
 }
 
 function canStartGrab(): boolean {
   if (!grabMetadata) {
     return false;
   }
-  return shouldDownloadVideo() || selectedSubtitleLanguages().length > 0;
+  return shouldDownloadVideo() || shouldDownloadSrt() || shouldDownloadJson3();
 }
 
 function applyGrabControlState(running = currentStatus.status === "running") {
   const hasMetadata = grabMetadata !== null;
-  grabberActionLabel.textContent = hasMetadata ? "Download" : "Start";
+  const hasSubtitleSelection = selectedSubtitleLanguages().length > 0;
+  grabberStartButton.classList.toggle("loading", running);
+  grabberStartButton.setAttribute("aria-busy", String(running));
+  grabberActionLabel.textContent = running
+    ? hasMetadata
+      ? "Downloading"
+      : "Fetching"
+    : hasMetadata
+      ? "Download"
+      : "Start";
   grabberStartButton.disabled = running || (!hasMetadata ? !grabUrl.value.trim() : !canStartGrab());
-  grabQuality.disabled = running || !hasMetadata;
+  grabDownloadVideo.disabled = running || !hasMetadata;
+  grabQuality.disabled = running || !hasMetadata || !grabDownloadVideo.checked;
+  grabSrt.disabled = running || !hasMetadata || !hasSubtitleSelection;
+  grabJson3.disabled = running || !hasMetadata || !hasSubtitleSelection;
   grabSubtitleOptions
     .querySelectorAll<HTMLInputElement>("input[type='checkbox']")
     .forEach((input) => {
@@ -1429,10 +1811,14 @@ function formatDuration(duration?: number): string | null {
 }
 
 function resetGrabMetadata() {
+  resetGrabContentPreview(true);
   grabMetadata = null;
   grabberMetadataSection.hidden = true;
   grabQuality.replaceChildren();
   grabSubtitleOptions.replaceChildren();
+  grabDownloadVideo.checked = true;
+  grabSrt.checked = true;
+  grabJson3.checked = false;
   applyGrabControlState();
 }
 
@@ -1442,11 +1828,7 @@ function renderGrabMetadata(metadata: GrabMetadata) {
   const detailParts = [metadata.extractor, formatDuration(metadata.duration)].filter(Boolean);
   grabberMetaLine.textContent = detailParts.join(" | ");
 
-  const noVideoOption = document.createElement("option");
-  noVideoOption.value = "none";
-  noVideoOption.textContent = "No video";
   grabQuality.replaceChildren(
-    noVideoOption,
     ...metadata.qualities.map((quality) => {
       const option = document.createElement("option");
       option.value = quality.value;
@@ -1482,7 +1864,8 @@ function renderGrabMetadata(metadata: GrabMetadata) {
       input.type = "checkbox";
       input.id = id;
       input.dataset.language = track.language;
-      input.checked = track.language === "de" || (!hasGerman && track.language === "en");
+      input.checked =
+        track.language === "de" || (!hasGerman && (track.language === "en" || track.language.startsWith("en-")));
       input.addEventListener("change", () => applyGrabControlState());
 
       const span = document.createElement("span");
@@ -1789,6 +2172,23 @@ async function chooseDirectory() {
   }
 }
 
+async function openGrabOutputDirectory() {
+  const directory = grabOutputDir.value.trim();
+  if (!directory) {
+    return;
+  }
+  try {
+    await invoke("open_directory", { options: { path: directory } });
+  } catch (error) {
+    setActiveWorkflow("grabber");
+    setStatus({
+      status: "error",
+      phase: "error",
+      message: String(error),
+    });
+  }
+}
+
 workflowTabs.dialogue.addEventListener("click", () => setActiveWorkflow("dialogue"));
 workflowTabs.processing.addEventListener("click", () => {
   setActiveWorkflow("processing");
@@ -1845,12 +2245,29 @@ transcribeBrowseButton.addEventListener("click", () =>
   ]),
 );
 grabOutputBrowseButton.addEventListener("click", () => chooseDirectory());
+grabOutputOpenButton.addEventListener("click", () => void openGrabOutputDirectory());
+grabberDownloadViewButton.addEventListener("click", () => setGrabMetadataView("download"));
+grabberPreviewViewButton.addEventListener("click", () => setGrabMetadataView("preview"));
 grabOutputDir.addEventListener("input", () => {
   workflowOutputPaths.grabber.textContent = grabOutputDir.value.trim();
+  setRunControls(currentStatus.status === "running");
   applyGrabControlState();
 });
-grabOutputDir.addEventListener("change", () => void loadMaterialGallery());
+grabOutputDir.addEventListener("change", () => {
+  void loadMaterialGallery();
+  resetGrabContentPreview(true);
+});
 materialRefreshButton.addEventListener("click", () => void loadMaterialGallery());
+grabContentRefreshButton.addEventListener("click", () => {
+  disarmGrabDeleteButton();
+  void loadGrabContentFiles(grabContentFileSelect.value);
+});
+grabContentFileSelect.addEventListener("change", () => {
+  disarmGrabDeleteButton();
+  void previewGrabContentFile(grabContentFileSelect.value);
+});
+grabContentDeleteButton.addEventListener("click", () => void deleteGrabContentFile());
+grabContentCopyButton.addEventListener("click", () => void copyGrabContent());
 grabUrl.addEventListener("input", () => {
   resetGrabMetadata();
   setStatus({
@@ -2039,6 +2456,12 @@ async function inspectGrabUrl() {
   runningWorkflow = "grabber";
   clearLog();
   resetGrabMetadata();
+  setStatus({
+    status: "running",
+    phase: "fetch",
+    message: "Fetching material metadata",
+  });
+  await waitForVisibleUpdate();
   try {
     const metadata = await invoke<GrabMetadata>("probe_grab", {
       options: {
@@ -2070,13 +2493,31 @@ async function downloadGrabSelection() {
   try {
     const subtitleLanguages = selectedSubtitleLanguages();
     const downloadVideo = shouldDownloadVideo();
-    const downloadSubtitles = subtitleLanguages.length > 0;
+    const downloadSubtitles = shouldDownloadSrt();
+    const downloadJson3Subtitles = shouldDownloadJson3();
+    const phase = downloadVideo ? "download" : "subtitles";
+    const message = downloadVideo
+      ? downloadSubtitles || downloadJson3Subtitles
+        ? "Downloading video and subtitles"
+        : "Downloading selected material"
+      : downloadSubtitles && downloadJson3Subtitles
+        ? "Saving SRT and JSON3 subtitles"
+        : downloadJson3Subtitles
+          ? "Saving JSON3 subtitles"
+          : "Saving SRT subtitles";
+    setStatus({
+      status: "running",
+      phase,
+      message,
+    });
+    await waitForVisibleUpdate();
     const outputDir = await invoke<string>("start_grab", {
       options: {
         url: grabUrl.value.trim(),
         outputDir: grabOutputDir.value.trim(),
         downloadVideo,
         downloadSubtitles,
+        downloadJson3Subtitles,
         quality: grabQuality.value,
         subtitleLanguages: subtitleLanguages.join(","),
       },
@@ -2098,6 +2539,9 @@ grabberStartButton.addEventListener("click", async () => {
     await inspectGrabUrl();
   }
 });
+grabDownloadVideo.addEventListener("change", () => applyGrabControlState());
+grabSrt.addEventListener("change", () => applyGrabControlState());
+grabJson3.addEventListener("change", () => applyGrabControlState());
 
 // ---------- Subtitle player ----------
 

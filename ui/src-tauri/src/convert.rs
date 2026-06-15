@@ -48,6 +48,7 @@ pub(crate) fn run_convert(
         Some(output_path),
     );
     let probe = MediaProbe::new(&paths);
+    let source_has_audio = probe.has_audio(&video_path);
     let codec = probe.video_codec(&video_path);
     if let Some(codec) = &codec {
         emit_log(app, "stdout", format!("Source video codec: {codec}"));
@@ -82,5 +83,30 @@ pub(crate) fn run_convert(
         .aac_audio()
         .mp4_faststart()
         .output(output_path)
-        .run(app, state, duration)
+        .run(app, state, duration)?;
+
+    if source_has_audio {
+        if !probe.has_audio(output_path) {
+            return Err("Converted MP4 has no audio stream. The source had audio, so this output is not usable.".into());
+        }
+        let audio_codec = probe
+            .audio_codec(output_path)
+            .ok_or("Could not inspect converted MP4 audio codec.")?;
+        if audio_codec != "aac" {
+            return Err(format!(
+                "Converted MP4 audio is {audio_codec}, expected AAC. This output may not play correctly."
+            ));
+        }
+        let channels = probe
+            .audio_channels(output_path)
+            .ok_or("Could not inspect converted MP4 audio channels.")?;
+        if channels != 2 {
+            return Err(format!(
+                "Converted MP4 audio is {channels} channels, expected stereo. This output may play silently in some players."
+            ));
+        }
+        emit_log(app, "stdout", "Verified converted audio: AAC stereo");
+    }
+
+    Ok(())
 }
