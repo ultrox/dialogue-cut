@@ -138,7 +138,10 @@ pub(crate) fn read_subtitle_file(path: &Path) -> Result<String, String> {
     let metadata = fs::metadata(path)
         .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
     if metadata.len() > MAX_SUBTITLE_BYTES {
-        return Err(format!("{} is too large for a subtitle file.", path.display()));
+        return Err(format!(
+            "{} is too large for a subtitle file.",
+            path.display()
+        ));
     }
     let bytes =
         fs::read(path).map_err(|error| format!("Could not read {}: {error}", path.display()))?;

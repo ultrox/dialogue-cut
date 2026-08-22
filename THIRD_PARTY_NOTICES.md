@@ -26,5 +26,11 @@ under Dialogue Cut's Application Support directory.
 
 ## yt-dlp
 
-The material grabber installs [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) and
-its Python dependencies from PyPI into the private runtime when needed.
+The material grabber installs [`yt-dlp`](https://github.com/yt-dlp/yt-dlp), its
+[`yt-dlp-ejs`](https://github.com/yt-dlp/ejs) challenge scripts, the
+[`deno`](https://github.com/denoland/deno) JavaScript runtime, and the
+[`bgutil-ytdlp-pot-provider`](https://github.com/Brainicism/bgutil-ytdlp-pot-provider)
+PO-token provider with its dependencies into the private runtime when needed.
+They are not included in the app bundle and can be updated independently from
+the Material Grabber interface. The provider uses the private Deno runtime to
+perform YouTube's proof-of-origin verification without launching a browser.

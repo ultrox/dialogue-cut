@@ -50,14 +50,24 @@ impl MediaProbe {
     pub(crate) fn video_codec(&self, target: &Path) -> Option<String> {
         self.entry(
             target,
-            &["-select_streams", "v:0", "-show_entries", "stream=codec_name"],
+            &[
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=codec_name",
+            ],
         )
     }
 
     pub(crate) fn video_dimensions(&self, target: &Path) -> Option<(u32, u32)> {
         let output = self.entry(
             target,
-            &["-select_streams", "v:0", "-show_entries", "stream=width,height"],
+            &[
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=width,height",
+            ],
         )?;
         let mut lines = output.lines();
         let width = lines.next()?.parse().ok()?;
@@ -76,7 +86,12 @@ impl MediaProbe {
     pub(crate) fn audio_codec(&self, target: &Path) -> Option<String> {
         self.entry(
             target,
-            &["-select_streams", "a:0", "-show_entries", "stream=codec_name"],
+            &[
+                "-select_streams",
+                "a:0",
+                "-show_entries",
+                "stream=codec_name",
+            ],
         )
     }
 

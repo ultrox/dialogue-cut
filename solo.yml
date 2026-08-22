@@ -2,8 +2,8 @@ name: Dialogue Cut
 icon_initials: DC
 processes:
   Dialogue Cut UI:
-    command: npm run tauri dev
-    working_dir: ./ui
+    command: pnpm --dir ./ui run tauri dev
+    working_dir: .
     auto_start: false
     auto_restart: false
     restart_when_changed:

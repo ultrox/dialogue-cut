@@ -32,7 +32,9 @@ use std::{
 };
 use tauri::{AppHandle, State};
 
-use audio_video::{output_path_for_audio_video, run_audio_video, AudioVideoOptions};
+use audio_video::{
+    image_path_for_audio_video, output_path_for_audio_video, run_audio_video, AudioVideoOptions,
+};
 use convert::{output_path_for_convert, run_convert, ConvertOptions};
 use dialogue::{output_path_for, run_conversion, ConversionOptions};
 use events::{emit_log, emit_status, RuntimeStatus};
@@ -40,18 +42,20 @@ use export::{output_path_for_export, run_export, ExportOptions};
 use gallery::{list_material_videos_inner, MaterialGalleryOptions, MaterialVideo};
 use grabber::{
     default_grab_output_dir, delete_grab_text_file_inner, list_grab_text_files_inner,
-    probe_grab_inner, read_grab_text_file_inner, run_grab, subtitle_language_spec, GrabMetadata,
-    GrabOptions, GrabProbeOptions, GrabTextFile,
+    probe_grab_inner, read_grab_text_file_inner, render_chapters, run_grab, GrabChapter,
+    GrabMetadata, GrabOptions, GrabProbeOptions, GrabTextFile,
 };
-use merge::{output_path_for_merge, run_merge, validated_video_paths, MergeOptions};
+use merge::{output_path_for_merge, run_merge, validated_media_paths, MergeOptions};
 use player::{
     IgnoreLoadOptions, IgnoreSaveOptions, SubtitleFile, SubtitleListOptions, SubtitleReadOptions,
 };
 use process::{
     existing_file, set_child_pid, start_background_job, terminate_process, ConversionState,
 };
-use runtime::probe_processor_paths;
-use runtime::runtime_status_inner;
+use runtime::{
+    downloader_status_inner, probe_processor_paths, run_downloader_install, runtime_status_inner,
+    DownloaderStatus,
+};
 use slowdown::{output_path_for_slowdown, run_slowdown, SlowdownOptions};
 use transcribe::{
     delete_model, list_models, model_cache_dir, normalized_formats, run_model_download,
@@ -62,6 +66,38 @@ use transcribe::{
 #[tauri::command]
 fn get_runtime_status(app: AppHandle) -> RuntimeStatus {
     runtime_status_inner(&app)
+}
+
+#[tauri::command]
+fn get_downloader_status(app: AppHandle) -> Result<DownloaderStatus, String> {
+    downloader_status_inner(&app)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DownloaderInstallOptions {
+    output_dir: String,
+}
+
+#[tauri::command]
+fn start_downloader_install(
+    app: AppHandle,
+    state: State<'_, ConversionState>,
+    options: DownloaderInstallOptions,
+) -> Result<String, String> {
+    let output_path = if options.output_dir.trim().is_empty() {
+        default_grab_output_dir()
+    } else {
+        PathBuf::from(options.output_dir.trim())
+    };
+    start_background_job(
+        app,
+        &state,
+        "Preparing the downloader",
+        "Downloader is ready",
+        output_path,
+        run_downloader_install,
+    )
 }
 
 #[tauri::command]
@@ -126,14 +162,14 @@ fn start_merge(
     state: State<'_, ConversionState>,
     options: MergeOptions,
 ) -> Result<String, String> {
-    let video_paths = validated_video_paths(&options.video_paths)?;
-    let output_path = output_path_for_merge(&video_paths, &options.output_path)?;
+    let media_paths = validated_media_paths(&options.media_paths)?;
+    let output_path = output_path_for_merge(&media_paths, &options.output_path)?;
     let worker_output = output_path.clone();
     start_background_job(
         app,
         &state,
         "Checking media tools",
-        "Merged video is ready",
+        "Merged media is ready",
         output_path,
         move |app, state| run_merge(app, state, &options, &worker_output),
     )
@@ -147,6 +183,9 @@ fn start_audio_video(
 ) -> Result<String, String> {
     let audio_path = existing_file(&options.audio_path)?;
     let output_path = output_path_for_audio_video(&audio_path, &options.output_path)?;
+    if image_path_for_audio_video(&options.image_path)?.as_deref() == Some(output_path.as_path()) {
+        return Err("The video output cannot overwrite the selected image file.".into());
+    }
     let worker_output = output_path.clone();
     start_background_job(
         app,
@@ -359,6 +398,23 @@ fn list_grab_text_files(options: GrabTextListOptions) -> Result<Vec<GrabTextFile
     list_grab_text_files_inner(&directory, options.url.as_deref())
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChapterRenderOptions {
+    chapters: Vec<GrabChapter>,
+    format: String,
+}
+
+/// Renders chapters for the clipboard through the same function that writes
+/// the files, so what you copy matches what you would have downloaded.
+#[tauri::command]
+fn render_grab_chapters(options: ChapterRenderOptions) -> Result<String, String> {
+    if options.chapters.is_empty() {
+        return Err("This video has no chapters to copy.".into());
+    }
+    Ok(render_chapters(&options.chapters, &options.format))
+}
+
 #[tauri::command]
 fn read_grab_text_file(options: GrabTextReadOptions) -> Result<String, String> {
     read_grab_text_file_inner(std::path::Path::new(options.path.trim()))
@@ -414,13 +470,38 @@ fn start_grab(
     if !(url.starts_with("https://") || url.starts_with("http://")) {
         return Err("Enter a valid http or https URL first.".into());
     }
-    if !options.download_video && !options.download_subtitles && !options.download_json3_subtitles {
-        return Err("Choose video, subtitles, or JSON3 captions.".into());
+    if !options.video && !options.audio && !options.subs && !options.chapters {
+        return Err("Turn on at least one track.".into());
     }
-    if (options.download_subtitles || options.download_json3_subtitles)
-        && subtitle_language_spec(&options.subtitle_languages).is_empty()
-    {
-        return Err("Choose at least one subtitle track.".into());
+    if options.audio && options.audio_langs.is_empty() {
+        return Err("Choose at least one audio language.".into());
+    }
+    if options.subs {
+        if options.manual_langs.is_empty() && options.auto_langs.is_empty() {
+            return Err("Choose at least one subtitle track.".into());
+        }
+        if options.subtitle_formats.is_empty() {
+            return Err("Choose at least one subtitle format.".into());
+        }
+        if options
+            .subtitle_formats
+            .iter()
+            .any(|format| !matches!(format.as_str(), "srt" | "vtt" | "json3"))
+        {
+            return Err("Subtitle formats must be SRT, WebVTT, or JSON3.".into());
+        }
+    }
+    if options.chapters {
+        if options.chapter_formats.is_empty() {
+            return Err("Choose at least one chapter format.".into());
+        }
+        if options
+            .chapter_formats
+            .iter()
+            .any(|format| !matches!(format.as_str(), "json" | "txt"))
+        {
+            return Err("Chapter formats must be JSON or plain text.".into());
+        }
     }
     let output_dir = if options.output_dir.trim().is_empty() {
         default_grab_output_dir()
@@ -457,14 +538,17 @@ pub fn run() {
         .manage(ConversionState::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .invoke_handler(tauri::generate_handler![
             get_runtime_status,
+            get_downloader_status,
             get_default_grab_output_dir,
             open_directory,
             list_material_videos,
             list_grab_text_files,
             read_grab_text_file,
             delete_grab_text_file,
+            render_grab_chapters,
             start_conversion,
             start_slowdown,
             start_convert,
@@ -474,6 +558,7 @@ pub fn run() {
             list_whisper_models,
             start_model_download,
             delete_whisper_model,
+            start_downloader_install,
             serve_media,
             list_subtitle_files,
             read_subtitle_file,

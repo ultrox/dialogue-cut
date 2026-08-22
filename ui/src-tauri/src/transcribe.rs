@@ -29,7 +29,11 @@ const SUPPORTED_FORMATS: [&str; 5] = ["srt", "vtt", "txt", "tsv", "json"];
 const WHISPER_MODELS: &[(&str, &str, u64)] = &[
     ("mlx-community/whisper-tiny", "Tiny — fastest, rough", 80),
     ("mlx-community/whisper-small-mlx", "Small — balanced", 480),
-    ("mlx-community/whisper-medium", "Medium — high accuracy", 1500),
+    (
+        "mlx-community/whisper-medium",
+        "Medium — high accuracy",
+        1500,
+    ),
     (
         "mlx-community/whisper-large-v3-turbo",
         "Large v3 Turbo — fast, high quality",
@@ -184,8 +188,7 @@ pub(crate) fn run_model_download(
         thread::spawn(move || {
             while !stop_polling.load(Ordering::SeqCst) {
                 let downloaded_mb = dir_size(&cache_dir) / (1024 * 1024);
-                let percent =
-                    ((downloaded_mb as f64 / size_mb as f64) * 100.0).clamp(0.0, 99.0);
+                let percent = ((downloaded_mb as f64 / size_mb as f64) * 100.0).clamp(0.0, 99.0);
                 emit_progress(
                     &app,
                     Some(percent),
@@ -307,7 +310,10 @@ pub(crate) fn run_transcribe(
     let paths = processor_paths(app, state)?;
     let mlx_whisper = paths.venv_dir.join("bin/mlx_whisper");
     if !mlx_whisper.is_file() {
-        return Err(format!("mlx_whisper not found at {}.", mlx_whisper.display()));
+        return Err(format!(
+            "mlx_whisper not found at {}.",
+            mlx_whisper.display()
+        ));
     }
 
     let work_dir = output_dir.join(format!("{base_name}.transcribe-tmp"));

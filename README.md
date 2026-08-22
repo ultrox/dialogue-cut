@@ -88,13 +88,19 @@ In the desktop app, open `Material grabber`, paste a URL, and click `Start`.
 The app asks `yt-dlp` for metadata first, then shows available video heights and
 exact subtitle language tracks. The output folder defaults to
 `~/Downloads/Dialogue Cut Material`; change it from `Output settings` only
-when you want a different destination. The same button changes to `Download`
-after metadata is loaded. The app uses a fixed `yt-dlp` preset:
+when you want a different destination. Each URL is saved into its own
+`Title [id]` subfolder. The same button changes to `Download` after metadata
+is loaded. `yt-dlp` is not bundled with the app: the managed copy downloads on
+the first scan. The Grabber checks it against the latest PyPI release and shows
+an `Update` button when an older version must be replaced. For YouTube, the
+managed bgutil provider performs playback verification through the private Deno
+runtime without opening a browser. The app uses a fixed `yt-dlp` preset:
 
 - one URL at a time, no playlist expansion
 - selected quality cap, best available, or `No video`
 - MP4 remux when possible
 - optional selected manual or generated subtitles converted to SRT
+- optional raw automatic captions as JSON3 for the selected subtitle languages
 - exact subtitle language keys from metadata, not wildcard language matching
 
 ## Distribution
@@ -106,10 +112,12 @@ cd ui
 npm run bundle:mac
 ```
 
-The packaged app installs a checksum-verified private Python runtime, static
-`ffmpeg`/`ffprobe`, MLX Whisper dependencies, and `yt-dlp` when needed.
+The packaged app does not bundle its large and frequently updated runtime
+dependencies. It installs a checksum-verified private Python runtime, static
+`ffmpeg`/`ffprobe`, MLX Whisper dependencies, and `yt-dlp` only when needed.
 Whisper model files download automatically on first transcription and stay
-cached in the app's Application Support directory.
+cached in the app's Application Support directory. The managed `yt-dlp` copy
+can be updated independently from the app in Material Grabber.
 
 Current packaged target: Apple Silicon Mac with macOS 13.5 or newer.
 

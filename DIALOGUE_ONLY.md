@@ -55,9 +55,15 @@ The `Material grabber` tab wraps `yt-dlp` for one-URL downloads. Paste a URL
 and click `Start`. The app fetches metadata, then shows available video heights
 and exact subtitle language tracks. The output folder defaults to
 `~/Downloads/Dialogue Cut Material`, and can be changed from `Output settings`.
+Each URL is saved into its own `Title [id]` subfolder so video, SRT, and JSON3
+caption files stay together.
 Select video, subtitles, or both directly from those controls, then click the
 same button after it changes to `Download`. Choose `No video` for subtitle-only
-downloads. Subtitle files are converted to SRT.
+downloads. Subtitle files are converted to SRT. The app downloads its managed
+`yt-dlp` copy on the first scan instead of bundling it. If that copy falls behind
+the latest PyPI release, Material Grabber requires an update before the next
+scan or download. YouTube playback verification runs through the managed Deno
+PO-token provider without opening a browser.
 
 ### Shareable macOS app
 
@@ -75,11 +81,12 @@ src-tauri/target/release/bundle/macos/Dialogue Cut.app
 src-tauri/target/release/bundle/dmg/Dialogue Cut_0.1.0_aarch64.dmg
 ```
 
-The shared app does not rely on Homebrew or a system Python installation. On
-the first conversion it installs a checksum-verified private Python runtime,
-`ffmpeg`, `ffprobe`, MLX Whisper dependencies, and `yt-dlp` under the app's
-Application Support directory. The Whisper model downloads automatically on the
-first transcription and remains cached.
+The shared app does not rely on Homebrew or a system Python installation. It
+installs a checksum-verified private Python runtime, `ffmpeg`, `ffprobe`, and
+MLX Whisper dependencies under the app's Application Support directory when
+their workflows first need them. Material Grabber similarly downloads and
+updates its private `yt-dlp` copy independently from the app bundle. The Whisper
+model downloads automatically on the first transcription and remains cached.
 
 Current distribution target: Apple Silicon Mac with macOS 13.5 or newer.
 

@@ -16,6 +16,7 @@ use crate::runtime::{media_paths, prepend_media_path};
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AudioVideoOptions {
     pub(crate) audio_path: String,
+    pub(crate) image_path: Option<String>,
     pub(crate) output_path: String,
     pub(crate) resolution: String,
     pub(crate) background: String,
@@ -59,11 +60,22 @@ pub(crate) fn output_path_for_audio_video(
     Ok(path)
 }
 
-fn validated_resolution(raw: &str) -> Result<&'static str, String> {
+pub(crate) fn image_path_for_audio_video(raw: &Option<String>) -> Result<Option<PathBuf>, String> {
+    let Some(image_path) = raw
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    existing_file(image_path).map(Some)
+}
+
+fn validated_resolution(raw: &str) -> Result<(&'static str, u32, u32), String> {
     match raw {
-        "1920x1080" => Ok("1920x1080"),
-        "1280x720" => Ok("1280x720"),
-        "1080x1080" => Ok("1080x1080"),
+        "1920x1080" => Ok(("1920x1080", 1920, 1080)),
+        "1280x720" => Ok(("1280x720", 1280, 720)),
+        "1080x1080" => Ok(("1080x1080", 1080, 1080)),
         _ => Err("Choose a supported video resolution.".into()),
     }
 }
@@ -84,7 +96,11 @@ pub(crate) fn run_audio_video(
     output_path: &Path,
 ) -> Result<(), String> {
     let audio_path = existing_file(&options.audio_path)?;
-    let resolution = validated_resolution(&options.resolution)?;
+    let image_path = image_path_for_audio_video(&options.image_path)?;
+    if image_path.as_deref() == Some(output_path) {
+        return Err("The video output cannot overwrite the selected image file.".into());
+    }
+    let (resolution, width, height) = validated_resolution(&options.resolution)?;
     let background = validated_background(&options.background)?;
     let paths = media_paths(app, state)?;
     let probe = MediaProbe::new(&paths);
@@ -105,34 +121,73 @@ pub(crate) fn run_audio_video(
     if duration <= 0.0 {
         return Err("The selected audio has no playable duration.".into());
     }
+    if let Some(image_path) = image_path.as_deref() {
+        if probe.video_dimensions(image_path).is_none() {
+            return Err("The selected image is not a readable image file.".into());
+        }
+    }
 
     emit_log(
         app,
         "stdout",
-        format!("Creating {} video for {}", resolution, audio_path.display()),
+        match image_path.as_deref() {
+            Some(image_path) => format!(
+                "Creating {} video for {} with {}",
+                resolution,
+                audio_path.display(),
+                image_path.display()
+            ),
+            None => format!("Creating {} video for {}", resolution, audio_path.display()),
+        },
     );
     emit_status(
         app,
         "running",
         "render",
-        "Rendering static-background video",
+        if image_path.is_some() {
+            "Rendering static-image video"
+        } else {
+            "Rendering static-background video"
+        },
         Some(output_path),
     );
 
-    let color_source = format!("color=c=0x{background}:s={resolution}:r=30:d={duration:.3}");
     let mut command = Command::new(paths.tools_dir.join("ffmpeg"));
     command
         .arg("-hide_banner")
         .args(["-loglevel", "error"])
         .arg("-y")
-        .args(["-nostats", "-progress", "pipe:1"])
-        .args(["-f", "lavfi"])
-        .arg("-i")
-        .arg(color_source)
-        .arg("-i")
-        .arg(&audio_path)
-        .args(["-map", "0:v:0"])
-        .args(["-map", "1:a:0"])
+        .args(["-nostats", "-progress", "pipe:1"]);
+    if let Some(image_path) = image_path.as_deref() {
+        let duration_arg = format!("{duration:.3}");
+        let frame_filter = format!(
+            "scale={width}:{height}:force_original_aspect_ratio=decrease,\
+pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=0x{background},setsar=1,format=yuv420p"
+        );
+        command
+            .args(["-loop", "1"])
+            .args(["-framerate", "30"])
+            .arg("-i")
+            .arg(image_path)
+            .arg("-i")
+            .arg(&audio_path)
+            .args(["-map", "0:v:0"])
+            .args(["-map", "1:a:0"])
+            .arg("-vf")
+            .arg(frame_filter)
+            .args(["-t", &duration_arg]);
+    } else {
+        let color_source = format!("color=c=0x{background}:s={resolution}:r=30:d={duration:.3}");
+        command
+            .args(["-f", "lavfi"])
+            .arg("-i")
+            .arg(color_source)
+            .arg("-i")
+            .arg(&audio_path)
+            .args(["-map", "0:v:0"])
+            .args(["-map", "1:a:0"]);
+    }
+    command
         .args(["-c:v", "libx264"])
         .args(["-preset", "veryfast"])
         .args(["-crf", "18"])

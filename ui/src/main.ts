@@ -1,6 +1,12 @@
+import "@fontsource/ibm-plex-sans/400.css";
+import "@fontsource/ibm-plex-sans/600.css";
+import "@fontsource/ibm-plex-sans/700.css";
+import "@fontsource/ibm-plex-mono/400.css";
+import "@fontsource/ibm-plex-mono/500.css";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
+import { writeText as writeClipboardText } from "@tauri-apps/plugin-clipboard-manager";
 import {
   ArrowDown,
   ArrowRightLeft,
@@ -9,6 +15,7 @@ import {
   CheckCircle2,
   Copy,
   ExternalLink,
+  FileImage,
   Circle,
   FileText,
   Film,
@@ -72,16 +79,40 @@ type RuntimeStatus = {
   message: string;
 };
 
+type DownloaderStatus = {
+  installed: boolean;
+  outdated: boolean;
+  repairNeeded: boolean;
+  installedVersion?: string;
+  latestVersion?: string;
+  message: string;
+};
+
 type GrabQuality = {
-  value: string;
+  height: number;
   label: string;
+  codec: string;
+  sizeBytes?: number;
+};
+
+type GrabAudioTrack = {
+  id: string;
+  name: string;
+  original: boolean;
+  sizeBytes?: number;
 };
 
 type GrabSubtitleTrack = {
+  id: string;
   language: string;
-  label: string;
-  hasManual: boolean;
-  hasAutomatic: boolean;
+  name: string;
+  auto: boolean;
+};
+
+type GrabChapter = {
+  start: number;
+  end: number;
+  title: string;
 };
 
 type GrabMetadata = {
@@ -89,8 +120,32 @@ type GrabMetadata = {
   webpageUrl: string;
   extractor: string;
   duration?: number;
+  thumbnail: string;
   qualities: GrabQuality[];
+  audioTracks: GrabAudioTrack[];
   subtitles: GrabSubtitleTrack[];
+  chapters: GrabChapter[];
+};
+
+type GrabSelection = {
+  video: boolean;
+  audio: boolean;
+  subs: boolean;
+  quality: number | null;
+  audioSel: string[];
+  mux: "muxed" | "separate";
+  subSel: string[];
+  fmtSel: string[];
+  chapters: boolean;
+  chapFmtSel: string[];
+};
+
+type GrabManifestFile = {
+  kind: string;
+  tone: "vid" | "aud" | "sub" | "chp";
+  name: string;
+  detail: string;
+  sizeBytes: number | null;
 };
 
 type MaterialVideo = {
@@ -140,7 +195,7 @@ const workflowPhases: Record<Workflow, readonly (readonly [string, string])[]> =
   merger: [
     ["setup", "Prepare tools"],
     ["inspect", "Inspect sources"],
-    ["merge", "Merge videos"],
+    ["merge", "Merge media"],
   ],
   transcribe: [
     ["setup", "Prepare runtime"],
@@ -153,6 +208,7 @@ const workflowPhases: Record<Workflow, readonly (readonly [string, string])[]> =
     ["fetch", "Fetch metadata"],
     ["download", "Download material"],
     ["subtitles", "Save subtitles"],
+    ["chapters", "Save chapters"],
   ],
   player: [
     ["setup", "Prepare tools"],
@@ -171,6 +227,8 @@ let currentStatus: ConversionStatus = {
   message: "Choose a movie file to begin",
 };
 let grabMetadata: GrabMetadata | null = null;
+let downloaderStatus: DownloaderStatus | null = null;
+let downloaderStatusLoading = true;
 let materialGalleryLoadId = 0;
 let grabContentLoadId = 0;
 let grabTextFiles: GrabTextFileEntry[] = [];
@@ -179,7 +237,25 @@ let currentGrabContentUrl = "";
 let grabMetadataView: GrabMetadataView = "download";
 let pendingGrabDeletePath = "";
 let pendingGrabDeleteTimer: number | undefined;
-let mergeVideoPaths: string[] = [];
+let grabPreviewPath = "";
+
+function defaultGrabSelection(): GrabSelection {
+  return {
+    video: true,
+    audio: true,
+    subs: true,
+    quality: null,
+    audioSel: [],
+    mux: "muxed",
+    subSel: [],
+    fmtSel: ["srt"],
+    chapters: false,
+    chapFmtSel: ["json"],
+  };
+}
+
+let grabSel: GrabSelection = defaultGrabSelection();
+let mergeMediaPaths: string[] = [];
 
 app.innerHTML = `
   <header class="app-header">
@@ -473,7 +549,16 @@ app.innerHTML = `
               <span class="eyebrow">Frame</span>
               <h2>Static background</h2>
             </div>
-            <i data-lucide="settings-2"></i>
+            <i data-lucide="file-image"></i>
+          </div>
+          <div class="audio-video-image-field">
+            <span class="field-label">Image</span>
+            <div class="file-row">
+              <input id="audio-video-image-path" type="text" placeholder="/path/to/image.png" spellcheck="false" />
+              <button id="audio-video-image-browse-button" class="icon-button" type="button" title="Choose image">
+                <i data-lucide="folder-open"></i>
+              </button>
+            </div>
           </div>
           <div class="metadata-grid">
             <div>
@@ -557,15 +642,12 @@ app.innerHTML = `
           <div class="action-row">
             <button id="merger-add-button" class="primary-button" type="button">
               <i data-lucide="list-plus"></i>
-              <span>Add videos</span>
+              <span>Add media</span>
             </button>
             <button id="merger-clear-button" class="secondary-button" type="button">
               <i data-lucide="trash-2"></i>
               <span>Clear</span>
             </button>
-          </div>
-          <div id="merger-file-list" class="merge-file-list">
-            <p class="empty-note">No videos selected.</p>
           </div>
         </section>
 
@@ -573,7 +655,7 @@ app.innerHTML = `
           <div class="section-heading">
             <div>
               <span class="eyebrow">Output</span>
-              <h2>Final MP4</h2>
+              <h2>Final file</h2>
             </div>
             <i data-lucide="file-text"></i>
           </div>
@@ -589,7 +671,7 @@ app.innerHTML = `
           <div class="section-heading compact">
             <div>
               <span class="eyebrow">Run</span>
-              <h2 id="merger-run-message">Select at least two videos</h2>
+              <h2 id="merger-run-message">Select at least two media files</h2>
             </div>
           </div>
           <div class="action-row">
@@ -607,6 +689,19 @@ app.innerHTML = `
           </div>
           <p id="merger-progress-detail" class="field-note"></p>
           <p id="merger-output-display" class="output-path"></p>
+        </section>
+
+        <section class="section-block">
+          <div class="section-heading compact">
+            <div>
+              <span class="eyebrow">Queue</span>
+              <h2>Merge order</h2>
+            </div>
+            <i data-lucide="list-plus"></i>
+          </div>
+          <div id="merger-file-list" class="merge-file-list">
+            <p class="empty-note">No media selected.</p>
+          </div>
         </section>
       </div>
 
@@ -718,19 +813,6 @@ app.innerHTML = `
         <section class="section-block player-main">
           <video id="player-video" class="player-video" controls preload="metadata"></video>
           <div class="player-controls">
-            <label class="player-offset">
-              <span>Jump offset</span>
-              <div class="number-field">
-                <input id="player-offset" type="number" min="0" max="5" step="0.1" value="0.5" />
-                <em>s</em>
-              </div>
-            </label>
-            <div class="preset-row player-offset-presets">
-              <button class="offset-preset preset-button" type="button" data-offset="0">0s</button>
-              <button class="offset-preset preset-button active" type="button" data-offset="0.5">0.5s</button>
-              <button class="offset-preset preset-button" type="button" data-offset="1">1s</button>
-              <button class="offset-preset preset-button" type="button" data-offset="2">2s</button>
-            </div>
             <div class="cue-nav">
               <button id="player-prev-cue" class="secondary-button" type="button" title="Previous cue">
                 <i data-lucide="skip-back"></i>
@@ -817,119 +899,175 @@ app.innerHTML = `
       </div>
 
       <div id="grabber-panel" class="tab-panel">
-        <section class="section-block source-block">
-          <div class="section-heading">
-            <div>
-              <span class="eyebrow">Source</span>
-              <h2>Paste a URL</h2>
-            </div>
-            <i data-lucide="hard-drive-download"></i>
-          </div>
-          <div class="input-action-row">
-            <input id="grab-url" type="text" placeholder="https://..." spellcheck="false" />
-            <button id="grabber-start-button" class="primary-button" type="button">
-              <i data-lucide="play"></i>
-              <span id="grabber-action-label">Start</span>
-            </button>
-            <button id="grabber-stop-button" class="secondary-button" type="button" disabled>
-              <i data-lucide="square"></i>
-              <span>Cancel</span>
-            </button>
-          </div>
-          <p id="grabber-run-message" class="inline-status">Paste a URL to begin</p>
-          <details class="settings-details">
-            <summary>
-              <i data-lucide="settings-2"></i>
-              <span>Output settings</span>
-            </summary>
-            <div class="settings-details-body">
-              <div class="file-row folder-action-row">
-                <input id="grab-output-dir" type="text" placeholder="/path/to/material" spellcheck="false" />
-                <button id="grab-output-browse-button" class="icon-button" type="button" title="Choose folder">
-                  <i data-lucide="target"></i>
-                </button>
-                <button id="grab-output-open-button" class="icon-button" type="button" title="Open output folder">
-                  <i data-lucide="external-link"></i>
-                </button>
-              </div>
-              <p id="grabber-output-path" class="output-path"></p>
-            </div>
-          </details>
-        </section>
-
-        <section id="grabber-metadata-section" class="section-block metadata-block" hidden>
-          <div class="section-heading">
-            <div>
-              <span class="eyebrow">Metadata</span>
-              <h2 id="grabber-title">Start with a URL</h2>
-            </div>
-            <i data-lucide="settings-2"></i>
-          </div>
-          <p id="grabber-meta-line" class="meta-line"></p>
-          <div class="metadata-view-tabs" role="tablist" aria-label="Grabber result views">
-            <button id="grabber-download-view-button" class="metadata-view-tab active" type="button" role="tab" aria-selected="true" aria-controls="grabber-download-view">
-              <i data-lucide="hard-drive-download"></i>
-              <span>Download</span>
-            </button>
-            <button id="grabber-preview-view-button" class="metadata-view-tab" type="button" role="tab" aria-selected="false" aria-controls="grabber-preview-view" disabled title="Download subtitles first">
-              <i data-lucide="file-text"></i>
-              <span>Preview</span>
-            </button>
-          </div>
-          <div id="grabber-download-view" class="metadata-view-panel">
-            <div class="metadata-grid">
-              <div>
-                <span class="field-label">Video</span>
-                <label class="checkbox-label grab-download-option">
-                  <input id="grab-download-video" type="checkbox" checked />
-                  <span>Download video</span>
-                </label>
-                <label>
-                  <span>Video quality</span>
-                  <select id="grab-quality"></select>
-                </label>
-              </div>
-              <div>
-                <span class="field-label">Subtitle tracks</span>
-                <div id="grab-subtitle-options" class="subtitle-options"></div>
-                <div class="grab-subtitle-format-options">
-                  <span class="field-label">Subtitle files</span>
-                  <label class="checkbox-label">
-                    <input id="grab-srt" type="checkbox" checked />
-                    <span>Download SRT</span>
-                  </label>
-                  <label class="checkbox-label">
-                    <input id="grab-json3" type="checkbox" />
-                    <span>Download JSON3</span>
-                  </label>
+        <div class="mg-page">
+          <div class="mg-column">
+            <div class="mg-source-row">
+              <div class="mg-source-field">
+                <div class="mg-source-main">
+                  <span class="mg-source-label">Source</span>
+                  <input id="grab-url" class="mg-url-input" type="text" placeholder="https://..." spellcheck="false" />
+                </div>
+                <div id="mg-source-status" class="mg-source-status" hidden>
+                  <span class="mg-source-dot"></span>
+                  <span id="mg-source-status-text"></span>
                 </div>
               </div>
+              <button id="grabber-start-button" class="mg-rescan-button" type="button">Scan</button>
+              <button id="grabber-stop-button" class="mg-rescan-button mg-cancel-button" type="button" hidden>Cancel</button>
             </div>
-          </div>
-          <div id="grabber-preview-view" class="metadata-view-panel" hidden>
-            <div id="grabber-content-section" class="content-preview-block" hidden>
-              <div class="content-preview-header">
-                <span class="field-label">Downloaded text</span>
-              </div>
-              <div class="content-toolbar">
-                <select id="grab-content-file"></select>
-                <button id="grab-content-refresh-button" class="icon-button" type="button" title="Refresh content">
-                  <i data-lucide="refresh-cw"></i>
-                </button>
-                <button id="grab-content-delete-button" class="icon-button danger-button" type="button" title="Delete selected file" disabled>
-                  <i data-lucide="trash-2"></i>
-                </button>
-                <button id="grab-content-copy-button" class="secondary-button" type="button" disabled>
-                  <i data-lucide="copy"></i>
-                  <span>Copy</span>
-                </button>
-              </div>
-              <p id="grab-content-path" class="output-path"></p>
-              <pre id="grab-content-preview" class="content-preview">No downloaded text files.</pre>
-            </div>
-          </div>
-        </section>
+            <p id="grabber-run-message" class="mg-run-message">Paste a URL to begin</p>
 
+            <div class="mg-downloader-row">
+              <i data-lucide="hard-drive-download"></i>
+              <div class="mg-downloader-copy">
+                <strong>yt-dlp downloader</strong>
+                <small id="mg-downloader-message">Checking the managed downloader...</small>
+              </div>
+              <span id="mg-downloader-chip" class="runtime-chip pending">Checking</span>
+              <button id="mg-downloader-action" class="mg-downloader-action" type="button" hidden>Download</button>
+            </div>
+
+            <div id="mg-metadata" hidden>
+              <div class="mg-meta-header">
+                <div class="mg-thumb">
+                  <span class="mg-thumb-placeholder">Thumbnail</span>
+                  <img id="mg-thumb-image" alt="" hidden />
+                  <span id="mg-thumb-duration" class="mg-thumb-duration" hidden></span>
+                </div>
+                <div class="mg-meta-text">
+                  <div class="mg-eyebrow">Metadata</div>
+                  <h2 id="grabber-title" class="mg-title"></h2>
+                  <div id="grabber-meta-line" class="mg-meta-line"></div>
+                </div>
+              </div>
+
+              <div class="mg-view-tabs" role="tablist" aria-label="Grabber result views">
+                <button id="grabber-download-view-button" class="mg-view-tab active" type="button" role="tab" aria-selected="true" aria-controls="grabber-download-view">Download</button>
+                <button id="grabber-preview-view-button" class="mg-view-tab" type="button" role="tab" aria-selected="false" aria-controls="grabber-preview-view">Preview</button>
+              </div>
+
+              <div id="grabber-download-view" class="mg-download-grid">
+                <div class="mg-track-cards">
+                  <section id="mg-audio-card" class="mg-card">
+                    <div class="mg-card-header">
+                      <div class="mg-card-badge mg-badge-aud">AUD</div>
+                      <div class="mg-card-heading">
+                        <div class="mg-card-title">Audio tracks</div>
+                        <div class="mg-card-subtitle">Pick one language per file, or several to get one file each</div>
+                      </div>
+                      <button id="mg-audio-switch" class="mg-switch" type="button" role="switch" aria-label="Audio tracks"><span class="mg-switch-knob"></span></button>
+                    </div>
+                    <div id="mg-audio-body" class="mg-card-body">
+                      <div id="mg-audio-combo"></div>
+                      <div id="mg-mux-section" class="mg-mux-section" hidden>
+                        <div class="mg-field-eyebrow">How to package it</div>
+                        <div class="mg-mux-row">
+                          <button id="mg-mux-muxed" class="mg-mux-option" type="button">
+                            <span class="mg-mux-title">Muxed video file</span>
+                            <span class="mg-mux-note">One .mp4 per language, picture + audio inside</span>
+                          </button>
+                          <button id="mg-mux-separate" class="mg-mux-option" type="button">
+                            <span class="mg-mux-title">Keep separate</span>
+                            <span class="mg-mux-note">Silent video + one .m4a per language</span>
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </section>
+
+                  <section id="mg-video-card" class="mg-card">
+                    <div class="mg-card-header">
+                      <div class="mg-card-badge mg-badge-vid">VID</div>
+                      <div class="mg-card-heading">
+                        <div class="mg-card-title">Video track</div>
+                        <div class="mg-card-subtitle">Picture only — language lives in the audio track</div>
+                      </div>
+                      <button id="mg-video-switch" class="mg-switch" type="button" role="switch" aria-label="Video track"><span class="mg-switch-knob"></span></button>
+                    </div>
+                    <div id="mg-video-body" class="mg-card-body">
+                      <div class="mg-field-eyebrow">Quality</div>
+                      <div id="mg-quality-pills" class="mg-pill-row"></div>
+                    </div>
+                  </section>
+
+                  <section id="mg-subs-card" class="mg-card">
+                    <div class="mg-card-header">
+                      <div class="mg-card-badge mg-badge-sub">SUB</div>
+                      <div class="mg-card-heading">
+                        <div class="mg-card-title">Subtitles</div>
+                        <div class="mg-card-subtitle">Independent of video and audio — take them on their own if you like</div>
+                      </div>
+                      <button id="mg-subs-switch" class="mg-switch" type="button" role="switch" aria-label="Subtitles"><span class="mg-switch-knob"></span></button>
+                    </div>
+                    <div id="mg-subs-body" class="mg-card-body">
+                      <div class="mg-subs-langs-row">
+                        <div class="mg-field-eyebrow">Languages</div>
+                        <button id="mg-match-audio" class="mg-match-audio" type="button">Match my audio languages</button>
+                      </div>
+                      <div id="mg-sub-combo"></div>
+                      <div class="mg-format-row">
+                        <div class="mg-field-eyebrow">Format</div>
+                        <span id="mg-format-pills" class="mg-format-pills"></span>
+                      </div>
+                    </div>
+                  </section>
+
+                  <section id="mg-chapters-card" class="mg-card" hidden>
+                    <div class="mg-card-header">
+                      <div class="mg-card-badge mg-badge-chp">CHP</div>
+                      <div class="mg-card-heading">
+                        <div class="mg-card-title">Chapters</div>
+                        <div class="mg-card-subtitle" id="mg-chapters-subtitle">Timestamped sections the uploader wrote in the description</div>
+                      </div>
+                      <button id="mg-chapters-switch" class="mg-switch" type="button" role="switch" aria-label="Chapters"><span class="mg-switch-knob"></span></button>
+                    </div>
+                    <div id="mg-chapters-body" class="mg-card-body">
+                      <div class="mg-format-row mg-format-row-first">
+                        <div class="mg-field-eyebrow">Format</div>
+                        <span id="mg-chapter-format-pills" class="mg-format-pills"></span>
+                        <button id="mg-chapters-copy" class="mg-match-audio mg-chapters-copy" type="button">Copy</button>
+                      </div>
+                      <div id="mg-chapters-list" class="mg-chapter-list"></div>
+                    </div>
+                  </section>
+                </div>
+
+                <aside class="mg-manifest">
+                  <div class="mg-manifest-header">
+                    <div class="mg-eyebrow-sm">You will get</div>
+                    <div id="mg-file-count" class="mg-file-count">0 files</div>
+                  </div>
+                  <div id="mg-manifest-list" class="mg-manifest-list"></div>
+                  <div class="mg-manifest-footer">
+                    <div class="mg-total-row"><span>Estimated total</span><span id="mg-total-size" class="mg-total-value">—</span></div>
+                    <button id="mg-download-button" class="mg-download-button" type="button" disabled>Download nothing</button>
+                    <button id="mg-output-settings-button" class="mg-output-settings-button" type="button">Output settings</button>
+                    <div id="mg-output-settings" class="mg-output-settings" hidden>
+                      <div class="mg-output-row">
+                        <input id="grab-output-dir" class="mg-output-input" type="text" placeholder="/path/to/material" spellcheck="false" />
+                        <button id="grab-output-browse-button" class="mg-output-action" type="button" title="Choose folder">Browse</button>
+                        <button id="grab-output-open-button" class="mg-output-action" type="button" title="Open output folder">Open</button>
+                      </div>
+                      <p id="grabber-output-path" class="mg-output-path"></p>
+                    </div>
+                  </div>
+                </aside>
+              </div>
+
+              <div id="grabber-preview-view" class="mg-preview-card" hidden>
+                <div class="mg-eyebrow-sm">Downloaded text</div>
+                <div class="mg-preview-toolbar">
+                  <div id="mg-preview-pills" class="mg-preview-pills"></div>
+                  <button id="grab-content-refresh-button" class="mg-toolbar-button mg-refetch-button" type="button">Refetch</button>
+                  <button id="grab-content-delete-button" class="mg-toolbar-button mg-delete-button" type="button" title="Delete selected file" disabled>Delete</button>
+                  <button id="grab-content-copy-button" class="mg-toolbar-button mg-copy-button" type="button" disabled>Copy</button>
+                </div>
+                <p id="grab-content-path" class="mg-preview-path"></p>
+                <pre id="grab-content-preview" class="mg-preview-text">No downloaded text files.</pre>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -962,6 +1100,7 @@ createIcons({
     Copy,
     Circle,
     ExternalLink,
+    FileImage,
     FileText,
     Film,
     FolderOpen,
@@ -1032,6 +1171,7 @@ const dialogueVideoPath = byId<HTMLInputElement>("dialogue-video-path");
 const processingVideoPath = byId<HTMLInputElement>("processing-video-path");
 const converterVideoPath = byId<HTMLInputElement>("converter-video-path");
 const audioVideoAudioPath = byId<HTMLInputElement>("audio-video-audio-path");
+const audioVideoImagePath = byId<HTMLInputElement>("audio-video-image-path");
 const audioVideoOutputPath = byId<HTMLInputElement>("audio-video-output-path");
 const mergerOutputPath = byId<HTMLInputElement>("merger-output-path");
 const transcribeVideoPath = byId<HTMLInputElement>("transcribe-video-path");
@@ -1041,6 +1181,7 @@ const dialogueBrowseButton = byId<HTMLButtonElement>("dialogue-browse-button");
 const processingBrowseButton = byId<HTMLButtonElement>("processing-browse-button");
 const converterBrowseButton = byId<HTMLButtonElement>("converter-browse-button");
 const audioVideoBrowseButton = byId<HTMLButtonElement>("audio-video-browse-button");
+const audioVideoImageBrowseButton = byId<HTMLButtonElement>("audio-video-image-browse-button");
 const audioVideoOutputBrowseButton = byId<HTMLButtonElement>("audio-video-output-browse-button");
 const mergerAddButton = byId<HTMLButtonElement>("merger-add-button");
 const mergerClearButton = byId<HTMLButtonElement>("merger-clear-button");
@@ -1048,7 +1189,6 @@ const mergerOutputBrowseButton = byId<HTMLButtonElement>("merger-output-browse-b
 const transcribeBrowseButton = byId<HTMLButtonElement>("transcribe-browse-button");
 const grabOutputBrowseButton = byId<HTMLButtonElement>("grab-output-browse-button");
 const grabOutputOpenButton = byId<HTMLButtonElement>("grab-output-open-button");
-const grabContentFileSelect = byId<HTMLSelectElement>("grab-content-file");
 const grabContentRefreshButton = byId<HTMLButtonElement>("grab-content-refresh-button");
 const grabContentDeleteButton = byId<HTMLButtonElement>("grab-content-delete-button");
 const grabContentCopyButton = byId<HTMLButtonElement>("grab-content-copy-button");
@@ -1059,7 +1199,6 @@ const audioVideoStartButton = byId<HTMLButtonElement>("audio-video-start-button"
 const mergerStartButton = byId<HTMLButtonElement>("merger-start-button");
 const transcribeStartButton = byId<HTMLButtonElement>("transcribe-start-button");
 const grabberStartButton = byId<HTMLButtonElement>("grabber-start-button");
-const grabberActionLabel = byId<HTMLElement>("grabber-action-label");
 const materialRefreshButton = byId<HTMLButtonElement>("material-refresh-button");
 const dialogueStopButton = byId<HTMLButtonElement>("dialogue-stop-button");
 const processingStopButton = byId<HTMLButtonElement>("processing-stop-button");
@@ -1080,7 +1219,6 @@ const playerSubtitle = byId<HTMLSelectElement>("player-subtitle");
 const playerSubtitleBrowse = byId<HTMLButtonElement>("player-subtitle-browse");
 const playerNote = byId<HTMLElement>("player-note");
 const playerVideo = byId<HTMLVideoElement>("player-video");
-const playerOffsetInput = byId<HTMLInputElement>("player-offset");
 const playerFollow = byId<HTMLInputElement>("player-follow");
 const playerDialogueOnly = byId<HTMLInputElement>("player-dialogue-only");
 const playerPrevCue = byId<HTMLButtonElement>("player-prev-cue");
@@ -1090,9 +1228,6 @@ const playerCueCount = byId<HTMLElement>("player-cue-count");
 const playerCueList = byId<HTMLElement>("player-cues");
 const playerStartButton = byId<HTMLButtonElement>("player-start-button");
 const playerStopButton = byId<HTMLButtonElement>("player-stop-button");
-const offsetPresetButtons = Array.from(
-  document.querySelectorAll<HTMLButtonElement>(".offset-preset"),
-);
 type ProgressElements = {
   track: HTMLElement;
   fill: HTMLElement;
@@ -1132,19 +1267,51 @@ const workflowProgress: Partial<Record<Workflow, ProgressElements>> = {
     detail: byId("player-progress-detail"),
   },
 };
-const grabberMetadataSection = document.querySelector<HTMLElement>("#grabber-metadata-section")!;
+const grabberMetadataSection = byId<HTMLElement>("mg-metadata");
 const grabberDownloadViewButton = byId<HTMLButtonElement>("grabber-download-view-button");
 const grabberPreviewViewButton = byId<HTMLButtonElement>("grabber-preview-view-button");
 const grabberDownloadView = document.querySelector<HTMLElement>("#grabber-download-view")!;
 const grabberPreviewView = document.querySelector<HTMLElement>("#grabber-preview-view")!;
-const grabberContentSection = document.querySelector<HTMLElement>("#grabber-content-section")!;
 const grabberTitle = document.querySelector<HTMLElement>("#grabber-title")!;
 const grabberMetaLine = document.querySelector<HTMLElement>("#grabber-meta-line")!;
-const grabQuality = document.querySelector<HTMLSelectElement>("#grab-quality")!;
-const grabSubtitleOptions = document.querySelector<HTMLElement>("#grab-subtitle-options")!;
-const grabDownloadVideo = document.querySelector<HTMLInputElement>("#grab-download-video")!;
-const grabSrt = document.querySelector<HTMLInputElement>("#grab-srt")!;
-const grabJson3 = document.querySelector<HTMLInputElement>("#grab-json3")!;
+const grabSourceStatus = byId<HTMLElement>("mg-source-status");
+const grabSourceStatusText = byId<HTMLElement>("mg-source-status-text");
+const grabThumbImage = byId<HTMLImageElement>("mg-thumb-image");
+const grabThumbDuration = byId<HTMLElement>("mg-thumb-duration");
+const grabVideoCard = byId<HTMLElement>("mg-video-card");
+const grabAudioCard = byId<HTMLElement>("mg-audio-card");
+const grabSubsCard = byId<HTMLElement>("mg-subs-card");
+const grabVideoSwitch = byId<HTMLButtonElement>("mg-video-switch");
+const grabAudioSwitch = byId<HTMLButtonElement>("mg-audio-switch");
+const grabSubsSwitch = byId<HTMLButtonElement>("mg-subs-switch");
+const grabVideoBody = byId<HTMLElement>("mg-video-body");
+const grabAudioBody = byId<HTMLElement>("mg-audio-body");
+const grabSubsBody = byId<HTMLElement>("mg-subs-body");
+const grabQualityPills = byId<HTMLElement>("mg-quality-pills");
+const grabMuxSection = byId<HTMLElement>("mg-mux-section");
+const grabMuxMuxedButton = byId<HTMLButtonElement>("mg-mux-muxed");
+const grabMuxSeparateButton = byId<HTMLButtonElement>("mg-mux-separate");
+const grabMatchAudioButton = byId<HTMLButtonElement>("mg-match-audio");
+const grabAudioComboRoot = byId<HTMLElement>("mg-audio-combo");
+const grabSubComboRoot = byId<HTMLElement>("mg-sub-combo");
+const grabFormatPills = byId<HTMLElement>("mg-format-pills");
+const grabChaptersCard = byId<HTMLElement>("mg-chapters-card");
+const grabChaptersSwitch = byId<HTMLButtonElement>("mg-chapters-switch");
+const grabChaptersBody = byId<HTMLElement>("mg-chapters-body");
+const grabChaptersSubtitle = byId<HTMLElement>("mg-chapters-subtitle");
+const grabChapterFormatPills = byId<HTMLElement>("mg-chapter-format-pills");
+const grabChaptersCopyButton = byId<HTMLButtonElement>("mg-chapters-copy");
+const grabChaptersList = byId<HTMLElement>("mg-chapters-list");
+const grabFileCount = byId<HTMLElement>("mg-file-count");
+const grabManifestList = byId<HTMLElement>("mg-manifest-list");
+const grabTotalSize = byId<HTMLElement>("mg-total-size");
+const grabDownloadButton = byId<HTMLButtonElement>("mg-download-button");
+const grabDownloaderMessage = byId<HTMLElement>("mg-downloader-message");
+const grabDownloaderChip = byId<HTMLElement>("mg-downloader-chip");
+const grabDownloaderAction = byId<HTMLButtonElement>("mg-downloader-action");
+const grabOutputSettingsButton = byId<HTMLButtonElement>("mg-output-settings-button");
+const grabOutputSettings = byId<HTMLElement>("mg-output-settings");
+const grabPreviewPills = byId<HTMLElement>("mg-preview-pills");
 const grabContentPath = document.querySelector<HTMLElement>("#grab-content-path")!;
 const grabContentPreview = document.querySelector<HTMLElement>("#grab-content-preview")!;
 const statusChip = document.querySelector<HTMLElement>("#status-chip")!;
@@ -1237,7 +1404,7 @@ function setRunControls(running: boolean) {
   processingStartButton.disabled = running;
   converterStartButton.disabled = running;
   audioVideoStartButton.disabled = running || !audioVideoAudioPath.value.trim();
-  mergerStartButton.disabled = running || mergeVideoPaths.length < 2;
+  mergerStartButton.disabled = running || mergeMediaPaths.length < 2;
   transcribeStartButton.disabled = running;
   playerStartButton.disabled = running;
   dialogueStopButton.disabled = !running;
@@ -1252,6 +1419,8 @@ function setRunControls(running: boolean) {
   processingBrowseButton.disabled = running;
   converterBrowseButton.disabled = running;
   audioVideoBrowseButton.disabled = running;
+  audioVideoImageBrowseButton.disabled = running;
+  audioVideoImagePath.disabled = running;
   audioVideoOutputBrowseButton.disabled = running;
   audioVideoResolutionButtons.forEach((button) => {
     button.disabled = running;
@@ -1260,15 +1429,11 @@ function setRunControls(running: boolean) {
     button.disabled = running;
   });
   mergerAddButton.disabled = running;
-  mergerClearButton.disabled = running || mergeVideoPaths.length === 0;
+  mergerClearButton.disabled = running || mergeMediaPaths.length === 0;
   mergerOutputBrowseButton.disabled = running;
   transcribeBrowseButton.disabled = running;
   grabOutputBrowseButton.disabled = running;
   grabOutputOpenButton.disabled = running || !grabOutputDir.value.trim();
-  grabContentRefreshButton.disabled = running || grabTextFiles.length === 0;
-  grabContentDeleteButton.disabled = running || grabTextFiles.length === 0;
-  grabContentFileSelect.disabled = running || grabTextFiles.length === 0;
-  grabContentCopyButton.disabled = running || !currentGrabContentText;
   updateGrabMetadataViewState(running);
   materialRefreshButton.disabled = running;
   applyMergeControlState(running);
@@ -1315,6 +1480,9 @@ function setStatus(status: ConversionStatus) {
   }
   if (workflow === "transcribe" && status.status === "complete" && status.message === "Whisper model is ready") {
     void loadWhisperModels();
+  }
+  if (workflow === "grabber" && status.status === "complete" && status.message === "Downloader is ready") {
+    void loadDownloaderStatus();
   }
   if (!running) {
     runningWorkflow = null;
@@ -1382,6 +1550,59 @@ function setRuntimeStatus(status: RuntimeStatus) {
   runtimeChip.className = `runtime-chip ${status.ready ? "ready" : "pending"}`;
   runtimeChip.textContent = status.ready ? "Ready" : "First-run setup";
   runtimeMessage.textContent = status.message;
+}
+
+function downloaderActionRequired(): boolean {
+  return (downloaderStatus?.outdated || downloaderStatus?.repairNeeded) ?? false;
+}
+
+function renderDownloaderStatus() {
+  if (downloaderStatusLoading) {
+    grabDownloaderChip.className = "runtime-chip pending";
+    grabDownloaderChip.textContent = "Checking";
+    grabDownloaderMessage.textContent = "Checking the managed downloader...";
+    grabDownloaderAction.hidden = true;
+  } else if (!downloaderStatus) {
+    grabDownloaderChip.className = "runtime-chip pending";
+    grabDownloaderChip.textContent = "Unknown";
+    grabDownloaderAction.hidden = true;
+  } else {
+    const { installed, outdated, repairNeeded, message } = downloaderStatus;
+    let chipState = "pending";
+    let chipLabel = "On demand";
+    if (outdated) {
+      chipState = "outdated";
+      chipLabel = "Update needed";
+    } else if (repairNeeded) {
+      chipState = "outdated";
+      chipLabel = "Repair needed";
+    } else if (installed) {
+      chipState = "ready";
+      chipLabel = "Ready";
+    }
+    grabDownloaderMessage.textContent = message;
+    grabDownloaderChip.className = `runtime-chip ${chipState}`;
+    grabDownloaderChip.textContent = chipLabel;
+    grabDownloaderAction.hidden = installed && !outdated && !repairNeeded;
+    grabDownloaderAction.textContent = outdated ? "Update" : repairNeeded ? "Repair" : "Download";
+  }
+  grabDownloaderAction.disabled = currentStatus.status === "running" || downloaderStatusLoading;
+  applyGrabControlState();
+}
+
+async function loadDownloaderStatus() {
+  downloaderStatusLoading = true;
+  renderDownloaderStatus();
+  try {
+    downloaderStatus = await invoke<DownloaderStatus>("get_downloader_status");
+  } catch (error) {
+    downloaderStatus = null;
+    grabDownloaderMessage.textContent = `Could not check yt-dlp: ${String(error)}`;
+    appendLog({ stream: "stderr", line: String(error) });
+  } finally {
+    downloaderStatusLoading = false;
+    renderDownloaderStatus();
+  }
 }
 
 function setGrabOutputDir(path: string) {
@@ -1505,23 +1726,13 @@ function grabTextFileLabel(file: GrabTextFileEntry): string {
     const pieces = stem.split(".").filter(Boolean);
     track = pieces[pieces.length - 1] ?? stem;
   }
-  track = track.replace(/\.(auto|manual)$/i, "-$1");
-
-  const subtitleTrack = grabMetadata?.subtitles.find((entry) => entry.language === track);
-  if (subtitleTrack?.hasAutomatic && !subtitleTrack.hasManual && !/-auto$/i.test(track)) {
-    track += "-auto";
-  } else if (subtitleTrack?.hasManual && !subtitleTrack.hasAutomatic && !/-manual$/i.test(track)) {
-    track += "-manual";
-  }
-
-  return track + "." + extension;
+  // The downloader writes auto captions as `<base>.auto.<lang>.<ext>`.
+  const autoMatch = track.match(/^auto\.(.+)$/i);
+  return autoMatch ? `${autoMatch[1]}-auto.${extension}` : `${track}-manual.${extension}`;
 }
 
 function updateGrabMetadataViewState(running = currentStatus.status === "running") {
   const hasPreview = grabTextFiles.length > 0;
-  if (!hasPreview && grabMetadataView === "preview") {
-    grabMetadataView = "download";
-  }
   const previewActive = grabMetadataView === "preview";
   grabberDownloadViewButton.classList.toggle("active", !previewActive);
   grabberPreviewViewButton.classList.toggle("active", previewActive);
@@ -1529,16 +1740,17 @@ function updateGrabMetadataViewState(running = currentStatus.status === "running
   grabberPreviewViewButton.setAttribute("aria-selected", String(previewActive));
   grabberDownloadView.hidden = previewActive;
   grabberPreviewView.hidden = !previewActive;
-  grabberPreviewViewButton.disabled = running || !hasPreview;
-  grabberPreviewViewButton.title = hasPreview ? "Preview downloaded text" : "Download subtitles first";
+  grabContentRefreshButton.disabled = running;
+  grabContentDeleteButton.disabled = running || !hasPreview;
+  grabContentCopyButton.disabled = running || !currentGrabContentText;
 }
 
 function setGrabMetadataView(view: GrabMetadataView) {
-  if (view === "preview" && grabTextFiles.length === 0) {
-    return;
-  }
   grabMetadataView = view;
   updateGrabMetadataViewState();
+  if (view === "preview" && grabTextFiles.length === 0) {
+    void loadGrabContentFiles();
+  }
 }
 
 function resetGrabPreviewScroll() {
@@ -1565,41 +1777,47 @@ function armGrabDeleteButton(path: string) {
   pendingGrabDeleteTimer = window.setTimeout(disarmGrabDeleteButton, 2500);
 }
 
-function resetGrabContentPreview(hidden = true, message = "No downloaded text files for this URL.") {
-  grabContentLoadId += 1;
-  grabTextFiles = [];
-  currentGrabContentText = "";
-  currentGrabContentUrl = "";
-  grabMetadataView = "download";
-  disarmGrabDeleteButton();
-  grabberContentSection.hidden = hidden;
-  grabContentFileSelect.replaceChildren();
-  grabContentFileSelect.disabled = true;
-  grabContentCopyButton.disabled = true;
-  grabContentDeleteButton.disabled = true;
-  grabContentRefreshButton.disabled = true;
-  grabContentPath.textContent = "";
-  grabContentPreview.textContent = message;
-  resetGrabPreviewScroll();
-  updateGrabMetadataViewState();
+function renderGrabPreviewPills() {
+  grabPreviewPills.replaceChildren();
+  if (grabTextFiles.length === 0) {
+    const empty = document.createElement("span");
+    empty.className = "mg-preview-empty";
+    empty.textContent = "No subtitle tracks selected yet.";
+    grabPreviewPills.append(empty);
+    return;
+  }
+  for (const file of grabTextFiles) {
+    const pill = document.createElement("button");
+    pill.type = "button";
+    pill.className = "mg-preview-pill";
+    pill.classList.toggle("active", file.path === grabPreviewPath);
+    pill.textContent = grabTextFileLabel(file);
+    pill.addEventListener("click", () => {
+      disarmGrabDeleteButton();
+      void previewGrabContentFile(file.path);
+    });
+    grabPreviewPills.append(pill);
+  }
 }
 
-function setGrabContentEmpty(message: string, hidden = true) {
+function resetGrabContentPreview(_hidden = true, message = "No downloaded text files for this URL.") {
+  grabContentLoadId += 1;
+  currentGrabContentUrl = "";
+  grabMetadataView = "download";
+  setGrabContentEmpty(message);
+}
+
+function setGrabContentEmpty(message: string) {
   currentGrabContentText = "";
   grabTextFiles = [];
+  grabPreviewPath = "";
   disarmGrabDeleteButton();
-  if (hidden) {
-    grabMetadataView = "download";
-  }
-  grabberContentSection.hidden = hidden;
-  grabContentFileSelect.replaceChildren();
-  grabContentFileSelect.disabled = true;
   grabContentCopyButton.disabled = true;
   grabContentDeleteButton.disabled = true;
-  grabContentRefreshButton.disabled = true;
   grabContentPath.textContent = "";
   grabContentPreview.textContent = message;
   resetGrabPreviewScroll();
+  renderGrabPreviewPills();
   updateGrabMetadataViewState();
 }
 
@@ -1609,26 +1827,14 @@ function renderGrabContentFiles(files: GrabTextFileEntry[], selectedPath?: strin
     setGrabContentEmpty("No downloaded text files for this URL.");
     return;
   }
-  grabberContentSection.hidden = false;
 
   const selected = files.find((file) => file.path === selectedPath) ?? files[0];
-  grabContentFileSelect.replaceChildren(
-    ...files.map((file) => {
-      const option = document.createElement("option");
-      option.value = file.path;
-      option.textContent = grabTextFileLabel(file);
-      return option;
-    }),
-  );
-  grabContentFileSelect.value = selected.path;
-  grabContentFileSelect.disabled = currentStatus.status === "running";
   grabContentRefreshButton.disabled = currentStatus.status === "running";
   grabContentDeleteButton.disabled = currentStatus.status === "running";
-  setGrabMetadataView("preview");
   void previewGrabContentFile(selected.path);
 }
 
-async function loadGrabContentFiles(preferredPath = grabContentFileSelect.value) {
+async function loadGrabContentFiles(preferredPath = grabPreviewPath) {
   if (currentStatus.status === "running") {
     return;
   }
@@ -1639,9 +1845,8 @@ async function loadGrabContentFiles(preferredPath = grabContentFileSelect.value)
   }
   const loadId = ++grabContentLoadId;
   currentGrabContentUrl = url;
-  const wasVisible = grabMetadataView === "preview" && !grabberContentSection.hidden;
   grabContentRefreshButton.disabled = true;
-  if (wasVisible) {
+  if (grabMetadataView === "preview") {
     grabContentPreview.textContent = "Loading text files...";
     resetGrabPreviewScroll();
   }
@@ -1658,7 +1863,7 @@ async function loadGrabContentFiles(preferredPath = grabContentFileSelect.value)
     }
   } catch (error) {
     if (loadId === grabContentLoadId && currentGrabContentUrl === url) {
-      setGrabContentEmpty(String(error), false);
+      setGrabContentEmpty(String(error));
     }
   } finally {
     if (loadId === grabContentLoadId && currentGrabContentUrl === url) {
@@ -1676,8 +1881,11 @@ async function previewGrabContentFile(path: string) {
     return;
   }
   disarmGrabDeleteButton();
+  grabPreviewPath = path;
   grabContentPath.textContent = path;
   grabContentCopyButton.disabled = true;
+  renderGrabPreviewPills();
+  updateGrabMetadataViewState();
   try {
     const content = await invoke<string>("read_grab_text_file", { options: { path } });
     currentGrabContentText = content;
@@ -1692,31 +1900,83 @@ async function previewGrabContentFile(path: string) {
   }
 }
 
+/// Writes to the system clipboard, reporting whether it actually worked.
+///
+/// The packaged app serves from the `tauri://` scheme, which is not a secure
+/// context, so `navigator.clipboard` is undefined there and `execCommand`
+/// returns false without throwing. Going through the clipboard plugin means
+/// Rust performs the write, which also avoids needing the transient user
+/// activation that an `await` before the copy would have consumed.
+async function copyText(text: string): Promise<boolean> {
+  try {
+    await writeClipboardText(text);
+    return true;
+  } catch {
+    // Fall through to the browser paths, which work in `npm run dev`.
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.style.position = "fixed";
+    textarea.style.opacity = "0";
+    document.body.append(textarea);
+    textarea.select();
+    const copied = document.execCommand("copy");
+    textarea.remove();
+    return copied;
+  }
+}
+
+function flashCopied(button: HTMLButtonElement, restore: string, ok: boolean) {
+  button.textContent = ok ? "Copied" : "Copy failed";
+  window.setTimeout(() => {
+    button.textContent = restore;
+  }, 1200);
+}
+
 async function copyGrabContent() {
   disarmGrabDeleteButton();
   if (!currentGrabContentText) {
     return;
   }
-  try {
-    await navigator.clipboard.writeText(currentGrabContentText);
-  } catch {
-    const textarea = document.createElement("textarea");
-    textarea.value = currentGrabContentText;
-    textarea.style.position = "fixed";
-    textarea.style.opacity = "0";
-    document.body.append(textarea);
-    textarea.select();
-    document.execCommand("copy");
-    textarea.remove();
+  flashCopied(grabContentCopyButton, "Copy", await copyText(currentGrabContentText));
+}
+
+/// Copies the chapter list in the selected format. With both formats on,
+/// plain text wins — it is the one you would paste into notes — and the
+/// button label always names what it will put on the clipboard.
+function chapterCopyFormat(): string {
+  return grabSel.chapFmtSel.includes("txt") ? "txt" : "json";
+}
+
+async function copyGrabChapters() {
+  const chapters = grabMetadata?.chapters ?? [];
+  if (chapters.length === 0) {
+    return;
   }
-  grabContentCopyButton.querySelector("span")!.textContent = "Copied";
-  window.setTimeout(() => {
-    grabContentCopyButton.querySelector("span")!.textContent = "Copy";
-  }, 1200);
+  const format = chapterCopyFormat();
+  grabChaptersCopyButton.disabled = true;
+  try {
+    const text = await invoke<string>("render_grab_chapters", {
+      options: { chapters, format },
+    });
+    flashCopied(grabChaptersCopyButton, chapterCopyLabel(), await copyText(text));
+  } catch (error) {
+    setStatus({ status: "error", phase: "error", message: String(error) });
+  } finally {
+    grabChaptersCopyButton.disabled = currentStatus.status === "running";
+  }
+}
+
+function chapterCopyLabel(): string {
+  return chapterCopyFormat() === "txt" ? "Copy plain text" : "Copy JSON";
 }
 
 async function deleteGrabContentFile() {
-  const path = grabContentFileSelect.value;
+  const path = grabPreviewPath;
   const file = grabTextFiles.find((entry) => entry.path === path);
   if (!file || currentStatus.status === "running") {
     return;
@@ -1745,55 +2005,545 @@ async function deleteGrabContentFile() {
   }
 }
 
-function selectedSubtitleLanguages(): string[] {
-  return Array.from(
-    grabSubtitleOptions.querySelectorAll<HTMLInputElement>("input[type='checkbox']:checked"),
-  )
-    .map((input) => input.dataset.language ?? "")
-    .filter(Boolean);
+// ---------- Material grabber: multi-select language combobox ----------
+
+type ComboOption = {
+  id: string;
+  name: string;
+  code: string;
+  badge: string;
+  badgeKind: "primary" | "muted";
+};
+
+type ComboConfig = {
+  root: HTMLElement;
+  tone: "aud" | "sub";
+  noun: string;
+  options: () => ComboOption[];
+  selected: () => string[];
+  toggle: (id: string) => void;
+};
+
+function createLanguageCombobox(config: ComboConfig) {
+  let query = "";
+  let open = false;
+
+  const control = document.createElement("div");
+  control.className = `mg-combo mg-combo-${config.tone}`;
+  const field = document.createElement("div");
+  field.className = "mg-combo-field";
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "mg-combo-input";
+  input.spellcheck = false;
+  const counter = document.createElement("span");
+  counter.className = "mg-combo-counter";
+  const dropdown = document.createElement("div");
+  dropdown.className = "mg-combo-dropdown";
+  dropdown.hidden = true;
+  control.append(field, dropdown);
+  config.root.replaceChildren(control);
+
+  function close() {
+    if (!open) {
+      return;
+    }
+    open = false;
+    query = "";
+    input.value = "";
+    render();
+  }
+
+  function render() {
+    const options = config.options();
+    const selected = config.selected();
+    const chosen = selected
+      .map((id) => options.find((option) => option.id === id))
+      .filter((option): option is ComboOption => option !== undefined);
+
+    field.replaceChildren();
+    for (const option of chosen) {
+      const pill = document.createElement("span");
+      pill.className = "mg-combo-pill";
+      const label = document.createElement("span");
+      label.textContent = option.name;
+      const badge = document.createElement("span");
+      badge.className = `mg-combo-pill-badge ${option.badgeKind}`;
+      badge.textContent = option.badge;
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "mg-combo-pill-remove";
+      remove.textContent = "×";
+      remove.setAttribute("aria-label", `Remove ${option.name}`);
+      remove.addEventListener("click", (event) => {
+        event.stopPropagation();
+        config.toggle(option.id);
+      });
+      pill.append(label, badge, remove);
+      field.append(pill);
+    }
+    input.placeholder = chosen.length
+      ? "Add a language…"
+      : `Search ${options.length} ${config.noun}…`;
+    counter.textContent = `${chosen.length} of ${options.length}`;
+    field.append(input, counter);
+
+    dropdown.hidden = !open;
+    if (!open) {
+      return;
+    }
+    const needle = query.trim().toLowerCase();
+    const matches = needle
+      ? options.filter(
+          (option) =>
+            option.name.toLowerCase().includes(needle) ||
+            option.code.toLowerCase().includes(needle),
+        )
+      : options;
+
+    dropdown.replaceChildren();
+    if (matches.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "mg-combo-empty";
+      empty.textContent = "No track matches that.";
+      dropdown.append(empty);
+      return;
+    }
+    for (const option of matches) {
+      const on = selected.includes(option.id);
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "mg-combo-row";
+      row.classList.toggle("selected", on);
+      const box = document.createElement("span");
+      box.className = "mg-combo-check";
+      box.textContent = on ? "✓" : "";
+      const name = document.createElement("span");
+      name.className = "mg-combo-name";
+      name.textContent = option.name;
+      const code = document.createElement("span");
+      code.className = "mg-combo-code";
+      code.textContent = option.code;
+      const badge = document.createElement("span");
+      badge.className = `mg-combo-row-badge ${option.badgeKind}`;
+      badge.textContent = option.badge;
+      row.append(box, name, code, badge);
+      row.addEventListener("click", () => config.toggle(option.id));
+      dropdown.append(row);
+    }
+  }
+
+  field.addEventListener("click", () => {
+    open = true;
+    input.focus();
+    render();
+  });
+  input.addEventListener("focus", () => {
+    open = true;
+    render();
+  });
+  input.addEventListener("input", () => {
+    query = input.value;
+    open = true;
+    render();
+  });
+  document.addEventListener("mousedown", (event) => {
+    if (open && !control.contains(event.target as Node)) {
+      close();
+    }
+  });
+
+  return { render, close };
 }
 
-function shouldDownloadVideo(): boolean {
-  return grabDownloadVideo.checked;
+// ---------- Material grabber: derived manifest ----------
+
+function grabQualityFor(height: number | null): GrabQuality | undefined {
+  return grabMetadata?.qualities.find((quality) => quality.height === height);
 }
 
-function shouldDownloadSrt(): boolean {
-  return grabSrt.checked && selectedSubtitleLanguages().length > 0;
+function grabAudioTrackFor(id: string): GrabAudioTrack | undefined {
+  return grabMetadata?.audioTracks.find((track) => track.id === id);
 }
 
-function shouldDownloadJson3(): boolean {
-  return grabJson3.checked && selectedSubtitleLanguages().length > 0;
+function grabSubtitleTrackFor(id: string): GrabSubtitleTrack | undefined {
+  return grabMetadata?.subtitles.find((track) => track.id === id);
+}
+
+function grabBaseName(): string {
+  const title = grabMetadata?.title ?? "material";
+  return (
+    title
+      .normalize("NFKD")
+      .replace(/[^\w\s-]/g, "")
+      .trim()
+      .replace(/\s+/g, "_")
+      .slice(0, 60) || "material"
+  );
+}
+
+/// Subtitle sizes are not in the probe; scale from duration the way captions do.
+function grabSubtitleSize(format: string): number | null {
+  const duration = grabMetadata?.duration;
+  if (!duration) {
+    return null;
+  }
+  const bytesPerSecond = format === "json3" ? 190 : 50;
+  return Math.round(duration * bytesPerSecond);
+}
+
+function grabManifest(): GrabManifestFile[] {
+  if (!grabMetadata) {
+    return [];
+  }
+  const files: GrabManifestFile[] = [];
+  const base = grabBaseName();
+  const quality = grabQualityFor(grabSel.quality);
+  const heightLabel = quality ? `${quality.height}p` : "best";
+  const videoSize = quality?.sizeBytes ?? null;
+  const audioLangs = grabSel.audio ? grabSel.audioSel : [];
+  const muxed = grabSel.mux === "muxed";
+
+  if (grabSel.video && audioLangs.length > 0 && muxed) {
+    for (const id of audioLangs) {
+      const track = grabAudioTrackFor(id);
+      const suffix = id ? `.${id}` : "";
+      files.push({
+        kind: "MP4",
+        tone: "vid",
+        name: `${base}.${heightLabel}${suffix}.mp4`,
+        detail: `Video ${heightLabel} + ${track?.name ?? id} audio`,
+        sizeBytes:
+          videoSize === null && track?.sizeBytes === undefined
+            ? null
+            : (videoSize ?? 0) + (track?.sizeBytes ?? 0),
+      });
+    }
+  } else if (grabSel.video) {
+    files.push({
+      kind: "MP4",
+      tone: "vid",
+      name: `${base}.${heightLabel}.video.mp4`,
+      detail: `Silent video ${heightLabel}`,
+      sizeBytes: videoSize,
+    });
+  }
+
+  if (audioLangs.length > 0 && (!grabSel.video || !muxed)) {
+    for (const id of audioLangs) {
+      const track = grabAudioTrackFor(id);
+      files.push({
+        kind: "M4A",
+        tone: "aud",
+        name: `${base}.${id || "audio"}.m4a`,
+        detail: `${track?.name ?? id} audio`,
+        sizeBytes: track?.sizeBytes ?? null,
+      });
+    }
+  }
+
+  if (grabSel.subs) {
+    for (const id of grabSel.subSel) {
+      const track = grabSubtitleTrackFor(id);
+      if (!track) {
+        continue;
+      }
+      for (const format of grabSel.fmtSel) {
+        const prefix = track.auto ? "auto." : "";
+        files.push({
+          kind: format.toUpperCase(),
+          tone: "sub",
+          name: `${base}.${prefix}${track.language}.${format}`,
+          detail: `${track.name} · ${track.auto ? "auto" : "manual"} captions`,
+          sizeBytes: grabSubtitleSize(format),
+        });
+      }
+    }
+  }
+
+  const chapters = grabMetadata.chapters ?? [];
+  if (grabSel.chapters && chapters.length > 0) {
+    for (const format of grabSel.chapFmtSel) {
+      files.push({
+        kind: format === "txt" ? "TXT" : "JSON",
+        tone: "chp",
+        name: `${base}.chapters.${format}`,
+        detail: `${chapters.length} chapters · ${
+          format === "json" ? "start and end times" : "description style"
+        }`,
+        sizeBytes: grabChapterSize(chapters, format),
+      });
+    }
+  }
+
+  return files;
+}
+
+/// Chapter files are written locally from data already in hand, so their size
+/// is the rendered text rather than anything the probe reports.
+function grabChapterSize(chapters: GrabChapter[], format: string): number {
+  const titles = chapters.reduce((sum, chapter) => sum + chapter.title.length, 0);
+  return titles + chapters.length * (format === "json" ? 78 : 8) + 2;
+}
+
+function formatByteSize(bytes: number | null): string {
+  if (bytes === null || bytes <= 0) {
+    return "—";
+  }
+  if (bytes >= 1024 ** 3) {
+    return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+  }
+  if (bytes >= 1024 ** 2) {
+    return `${Math.round(bytes / 1024 ** 2)} MB`;
+  }
+  return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+}
+
+// ---------- Material grabber: rendering ----------
+
+function renderGrabQualityPills() {
+  grabQualityPills.replaceChildren();
+  for (const quality of grabMetadata?.qualities ?? []) {
+    const pill = document.createElement("button");
+    pill.type = "button";
+    pill.className = "mg-pill";
+    pill.classList.toggle("selected", grabSel.quality === quality.height);
+    const label = document.createElement("span");
+    label.className = "mg-pill-label";
+    label.textContent = quality.label;
+    pill.append(label);
+    if (quality.codec) {
+      const codec = document.createElement("span");
+      codec.className = "mg-pill-meta";
+      codec.textContent = quality.codec;
+      pill.append(codec);
+    }
+    pill.addEventListener("click", () => {
+      grabSel.quality = quality.height;
+      renderGrabSelection();
+    });
+    grabQualityPills.append(pill);
+  }
+}
+
+/// Renders the format pills for one track. At least one format must stay
+/// selected, so deselecting the last one is a no-op.
+function renderFormatPills(
+  host: HTMLElement,
+  formats: readonly (readonly [string, string])[],
+  selected: () => string[],
+  apply: (next: string[]) => void,
+) {
+  host.replaceChildren();
+  for (const [id, label] of formats) {
+    const pill = document.createElement("button");
+    pill.type = "button";
+    pill.className = "mg-pill mg-pill-sm";
+    pill.classList.toggle("selected", selected().includes(id));
+    pill.textContent = label;
+    pill.addEventListener("click", () => {
+      const current = selected();
+      if (current.includes(id)) {
+        if (current.length === 1) {
+          return;
+        }
+        apply(current.filter((value) => value !== id));
+      } else {
+        apply([...current, id]);
+      }
+      renderGrabSelection();
+    });
+    host.append(pill);
+  }
+}
+
+function renderGrabFormatPills() {
+  renderFormatPills(
+    grabFormatPills,
+    [
+      ["srt", "SRT"],
+      ["vtt", "WebVTT"],
+      ["json3", "JSON3"],
+    ],
+    () => grabSel.fmtSel,
+    (next) => {
+      grabSel.fmtSel = next;
+    },
+  );
+}
+
+/// Unlike a duration, a chapter start of 0 is a real value rather than
+/// "unknown", so this cannot fall back the way formatDuration does.
+function formatChapterTime(seconds: number): string {
+  const total = Math.max(0, Math.floor(Number(seconds) || 0));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const secs = total % 60;
+  const paddedSeconds = String(secs).padStart(2, "0");
+  return hours > 0
+    ? `${hours}:${String(minutes).padStart(2, "0")}:${paddedSeconds}`
+    : `${minutes}:${paddedSeconds}`;
+}
+
+function renderGrabChapterCard() {
+  const chapters = grabMetadata?.chapters ?? [];
+  // Nothing to offer when the uploader never wrote any.
+  grabChaptersCard.hidden = chapters.length === 0;
+  if (chapters.length === 0) {
+    return;
+  }
+  grabChaptersSubtitle.textContent = `${chapters.length} section${
+    chapters.length === 1 ? "" : "s"
+  } the uploader marked in the description`;
+
+  renderFormatPills(
+    grabChapterFormatPills,
+    [
+      ["json", "JSON"],
+      ["txt", "Plain text"],
+    ],
+    () => grabSel.chapFmtSel,
+    (next) => {
+      grabSel.chapFmtSel = next;
+    },
+  );
+
+  grabChaptersCopyButton.textContent = chapterCopyLabel();
+
+  grabChaptersList.replaceChildren();
+  for (const chapter of chapters) {
+    const row = document.createElement("div");
+    row.className = "mg-chapter-row";
+    const time = document.createElement("span");
+    time.className = "mg-chapter-time";
+    time.textContent = formatChapterTime(chapter.start);
+    const title = document.createElement("span");
+    title.className = "mg-chapter-title";
+    title.textContent = chapter.title;
+    row.append(time, title);
+    grabChaptersList.append(row);
+  }
+}
+
+function renderGrabManifest() {
+  const files = grabManifest();
+  grabFileCount.textContent = files.length === 1 ? "1 file" : `${files.length} files`;
+
+  grabManifestList.replaceChildren();
+  if (files.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "mg-manifest-empty";
+    empty.textContent = "Nothing selected yet. Turn on a track above.";
+    grabManifestList.append(empty);
+  } else {
+    for (const file of files) {
+      const row = document.createElement("div");
+      row.className = "mg-manifest-row";
+      const chip = document.createElement("div");
+      chip.className = `mg-kind-chip mg-tone-${file.tone}`;
+      chip.textContent = file.kind;
+      const middle = document.createElement("div");
+      middle.className = "mg-manifest-main";
+      const name = document.createElement("div");
+      name.className = "mg-manifest-name";
+      name.textContent = file.name;
+      const detail = document.createElement("div");
+      detail.className = "mg-manifest-detail";
+      detail.textContent = file.detail;
+      middle.append(name, detail);
+      const size = document.createElement("div");
+      size.className = "mg-manifest-size";
+      size.textContent = formatByteSize(file.sizeBytes);
+      row.append(chip, middle, size);
+      grabManifestList.append(row);
+    }
+  }
+
+  const known = files.filter((file) => file.sizeBytes !== null);
+  const total = known.reduce((sum, file) => sum + (file.sizeBytes ?? 0), 0);
+  grabTotalSize.textContent =
+    files.length === 0 ? "—" : known.length === 0 ? "unknown" : formatByteSize(total);
+
+  grabDownloadButton.textContent = files.length
+    ? `Download ${files.length === 1 ? "1 file" : `${files.length} files`}`
+    : "Download nothing";
+}
+
+function renderGrabSelection() {
+  if (!grabMetadata) {
+    return;
+  }
+  for (const [card, body, toggle, on] of [
+    [grabVideoCard, grabVideoBody, grabVideoSwitch, grabSel.video],
+    [grabAudioCard, grabAudioBody, grabAudioSwitch, grabSel.audio],
+    [grabSubsCard, grabSubsBody, grabSubsSwitch, grabSel.subs],
+    [grabChaptersCard, grabChaptersBody, grabChaptersSwitch, grabSel.chapters],
+  ] as const) {
+    card.classList.toggle("off", !on);
+    body.hidden = !on;
+    toggle.classList.toggle("on", on);
+    toggle.setAttribute("aria-checked", String(on));
+  }
+
+  renderGrabQualityPills();
+  grabAudioCombo?.render();
+  grabSubCombo?.render();
+  renderGrabFormatPills();
+  renderGrabChapterCard();
+
+  // Packaging is only meaningful when both video and audio are on.
+  grabMuxSection.hidden = !(grabSel.video && grabSel.audio);
+  grabMuxMuxedButton.classList.toggle("selected", grabSel.mux === "muxed");
+  grabMuxSeparateButton.classList.toggle("selected", grabSel.mux === "separate");
+
+  renderGrabManifest();
+  applyGrabControlState();
+}
+
+let grabAudioCombo: ReturnType<typeof createLanguageCombobox> | null = null;
+let grabSubCombo: ReturnType<typeof createLanguageCombobox> | null = null;
+
+function toggleGrabAudioLanguage(id: string) {
+  grabSel.audioSel = grabSel.audioSel.includes(id)
+    ? grabSel.audioSel.filter((value) => value !== id)
+    : [...grabSel.audioSel, id];
+  renderGrabSelection();
+}
+
+function toggleGrabSubtitleTrack(id: string) {
+  grabSel.subSel = grabSel.subSel.includes(id)
+    ? grabSel.subSel.filter((value) => value !== id)
+    : [...grabSel.subSel, id];
+  renderGrabSelection();
 }
 
 function canStartGrab(): boolean {
-  if (!grabMetadata) {
-    return false;
-  }
-  return shouldDownloadVideo() || shouldDownloadSrt() || shouldDownloadJson3();
+  return !downloaderActionRequired() && grabMetadata !== null && grabManifest().length > 0;
 }
 
 function applyGrabControlState(running = currentStatus.status === "running") {
   const hasMetadata = grabMetadata !== null;
-  const hasSubtitleSelection = selectedSubtitleLanguages().length > 0;
-  grabberStartButton.classList.toggle("loading", running);
-  grabberStartButton.setAttribute("aria-busy", String(running));
-  grabberActionLabel.textContent = running
-    ? hasMetadata
-      ? "Downloading"
-      : "Fetching"
-    : hasMetadata
-      ? "Download"
-      : "Start";
-  grabberStartButton.disabled = running || (!hasMetadata ? !grabUrl.value.trim() : !canStartGrab());
-  grabDownloadVideo.disabled = running || !hasMetadata;
-  grabQuality.disabled = running || !hasMetadata || !grabDownloadVideo.checked;
-  grabSrt.disabled = running || !hasMetadata || !hasSubtitleSelection;
-  grabJson3.disabled = running || !hasMetadata || !hasSubtitleSelection;
-  grabSubtitleOptions
-    .querySelectorAll<HTMLInputElement>("input[type='checkbox']")
-    .forEach((input) => {
-      input.disabled = running || !hasMetadata;
-    });
+  const downloaderBlocked = downloaderActionRequired();
+  grabberStartButton.textContent = running && !hasMetadata ? "Scanning" : hasMetadata ? "Re-scan" : "Scan";
+  grabberStartButton.disabled = running || downloaderBlocked || !grabUrl.value.trim();
+  grabberStartButton.hidden = running && hasMetadata;
+  grabberStopButton.hidden = !running;
+  grabDownloadButton.disabled = running || !canStartGrab();
+  grabDownloaderAction.disabled = running || downloaderStatusLoading;
+  for (const control of [
+    grabVideoSwitch,
+    grabAudioSwitch,
+    grabSubsSwitch,
+    grabChaptersSwitch,
+    grabChaptersCopyButton,
+    grabMatchAudioButton,
+    grabMuxMuxedButton,
+    grabMuxSeparateButton,
+  ]) {
+    control.disabled = running || !hasMetadata;
+  }
+  grabOutputBrowseButton.disabled = running;
+  grabOutputOpenButton.disabled = running || !grabOutputDir.value.trim();
 }
 
 function formatDuration(duration?: number): string | null {
@@ -1814,69 +2564,102 @@ function resetGrabMetadata() {
   resetGrabContentPreview(true);
   grabMetadata = null;
   grabberMetadataSection.hidden = true;
-  grabQuality.replaceChildren();
-  grabSubtitleOptions.replaceChildren();
-  grabDownloadVideo.checked = true;
-  grabSrt.checked = true;
-  grabJson3.checked = false;
+  grabSourceStatus.hidden = true;
+  grabSel = defaultGrabSelection();
   applyGrabControlState();
 }
 
 function renderGrabMetadata(metadata: GrabMetadata) {
   grabberMetadataSection.hidden = false;
   grabberTitle.textContent = metadata.title;
-  const detailParts = [metadata.extractor, formatDuration(metadata.duration)].filter(Boolean);
-  grabberMetaLine.textContent = detailParts.join(" | ");
 
-  grabQuality.replaceChildren(
-    ...metadata.qualities.map((quality) => {
-      const option = document.createElement("option");
-      option.value = quality.value;
-      option.textContent = quality.label;
-      return option;
-    }),
+  const durationLabel = formatDuration(metadata.duration);
+  grabThumbImage.hidden = !metadata.thumbnail;
+  if (metadata.thumbnail) {
+    grabThumbImage.src = metadata.thumbnail;
+  }
+  grabThumbDuration.hidden = !durationLabel;
+  grabThumbDuration.textContent = durationLabel ?? "";
+
+  const original = metadata.audioTracks.find((track) => track.original);
+  const maxHeight = metadata.qualities[0]?.label;
+  grabberMetaLine.replaceChildren();
+  const parts = [
+    metadata.extractor,
+    durationLabel,
+    maxHeight ? `up to ${maxHeight}` : null,
+    original ? `original audio: ${original.name}` : null,
+  ].filter((part): part is string => Boolean(part));
+  parts.forEach((part, index) => {
+    if (index > 0) {
+      const separator = document.createElement("span");
+      separator.className = "mg-meta-separator";
+      separator.textContent = "/";
+      grabberMetaLine.append(separator);
+    }
+    const span = document.createElement("span");
+    span.textContent = part;
+    grabberMetaLine.append(span);
+  });
+
+  const audioCount = metadata.audioTracks.length;
+  const subCount = metadata.subtitles.length;
+  grabSourceStatus.hidden = false;
+  grabSourceStatusText.textContent = `${audioCount} audio · ${subCount} subtitle ${
+    subCount === 1 ? "track" : "tracks"
+  } found`;
+
+  // Default to 1080p (or the closest lower option), the original audio track,
+  // and any German/English subtitles the video happens to carry.
+  grabSel.quality =
+    (metadata.qualities.find((quality) => quality.height === 1080) ??
+      metadata.qualities.find((quality) => quality.height < 1080) ??
+      metadata.qualities[0])?.height ?? null;
+  grabSel.audioSel = original ? [original.id] : metadata.audioTracks.slice(0, 1).map((t) => t.id);
+  const preferred = metadata.subtitles.filter(
+    (track) => track.language === "de" || track.language === "en" || track.language.startsWith("en-"),
   );
-  const defaultQuality =
-    metadata.qualities.find((quality) => quality.value === "1080") ??
-    metadata.qualities.find((quality) => {
-      const height = Number(quality.value);
-      return Number.isFinite(height) && height < 1080;
-    }) ??
-    metadata.qualities[0];
-  if (defaultQuality) {
-    grabQuality.value = defaultQuality.value;
-  }
+  const manualPreferred = preferred.filter((track) => !track.auto);
+  grabSel.subSel = (manualPreferred.length > 0 ? manualPreferred : preferred.slice(0, 1)).map(
+    (track) => track.id,
+  );
+  grabSel.subs = grabSel.subSel.length > 0;
+  grabSel.audio = metadata.audioTracks.length > 0;
+  grabSel.video = metadata.qualities.length > 0;
+  grabSel.chapters = metadata.chapters.length > 0;
 
-  grabSubtitleOptions.replaceChildren();
-  if (metadata.subtitles.length === 0) {
-    const empty = document.createElement("p");
-    empty.className = "empty-note";
-    empty.textContent = "No subtitle tracks found.";
-    grabSubtitleOptions.append(empty);
-  } else {
-    const hasGerman = metadata.subtitles.some((track) => track.language === "de");
-    metadata.subtitles.forEach((track) => {
-      const id = `subtitle-${track.language.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
-      const label = document.createElement("label");
-      label.className = "checkbox-label";
+  grabAudioCombo = createLanguageCombobox({
+    root: grabAudioComboRoot,
+    tone: "aud",
+    noun: "audio tracks",
+    options: () =>
+      (grabMetadata?.audioTracks ?? []).map((track) => ({
+        id: track.id,
+        name: track.name,
+        code: track.id || "und",
+        badge: track.original ? "original" : "dubbed",
+        badgeKind: track.original ? "primary" : "muted",
+      })),
+    selected: () => grabSel.audioSel,
+    toggle: toggleGrabAudioLanguage,
+  });
+  grabSubCombo = createLanguageCombobox({
+    root: grabSubComboRoot,
+    tone: "sub",
+    noun: "subtitle tracks",
+    options: () =>
+      (grabMetadata?.subtitles ?? []).map((track) => ({
+        id: track.id,
+        name: track.name,
+        code: track.language,
+        badge: track.auto ? "auto" : "manual",
+        badgeKind: track.auto ? "muted" : "primary",
+      })),
+    selected: () => grabSel.subSel,
+    toggle: toggleGrabSubtitleTrack,
+  });
 
-      const input = document.createElement("input");
-      input.type = "checkbox";
-      input.id = id;
-      input.dataset.language = track.language;
-      input.checked =
-        track.language === "de" || (!hasGerman && (track.language === "en" || track.language.startsWith("en-")));
-      input.addEventListener("change", () => applyGrabControlState());
-
-      const span = document.createElement("span");
-      span.textContent = track.label;
-
-      label.append(input, span);
-      grabSubtitleOptions.append(label);
-    });
-  }
-
-  applyGrabControlState();
+  renderGrabSelection();
 }
 
 function updateSpeed(value: string) {
@@ -1891,6 +2674,7 @@ function updateSpeed(value: string) {
 
 const videoExtensions = ["mkv", "mp4", "mov", "m4v", "webm"];
 const audioExtensions = ["mp3", "m4a", "wav", "aac", "flac", "ogg"];
+const imageExtensions = ["png", "jpg", "jpeg", "webp", "bmp"];
 
 const workflowReadyMessages: Partial<Record<Workflow, string>> = {
   dialogue: "Ready to convert",
@@ -1905,8 +2689,22 @@ function fileName(path: string): string {
   return path.split(/[\\/]/).pop() ?? path;
 }
 
+function pathExtension(path: string): string {
+  const name = fileName(path);
+  const dotIndex = name.lastIndexOf(".");
+  return dotIndex === -1 ? "" : name.slice(dotIndex + 1).toLowerCase();
+}
+
+function pathHasAudioExtension(path: string): boolean {
+  return audioExtensions.includes(pathExtension(path));
+}
+
+function mergeOutputExtension(): "m4a" | "mp4" {
+  return mergeMediaPaths[0] && pathHasAudioExtension(mergeMediaPaths[0]) ? "m4a" : "mp4";
+}
+
 function defaultMergeOutputPath(): string {
-  const firstPath = mergeVideoPaths[0];
+  const firstPath = mergeMediaPaths[0];
   if (!firstPath) {
     return "";
   }
@@ -1914,7 +2712,8 @@ function defaultMergeOutputPath(): string {
   const directory = separatorIndex === -1 ? "" : firstPath.slice(0, separatorIndex + 1);
   const name = firstPath.slice(separatorIndex + 1);
   const stem = name.replace(/\.[^.]*$/, "") || "merged";
-  return `${directory}${stem}.merged.mp4`;
+  const extension = mergeOutputExtension();
+  return `${directory}${stem}.merged.${extension}`;
 }
 
 function defaultAudioVideoOutputPath(): string {
@@ -1927,6 +2726,12 @@ function defaultAudioVideoOutputPath(): string {
   const name = sourcePath.slice(separatorIndex + 1);
   const stem = name.replace(/\.[^.]*$/, "") || "audio";
   return `${directory}${stem}.audio-video.mp4`;
+}
+
+function syncAudioVideoOutputPath() {
+  const outputPath = defaultAudioVideoOutputPath();
+  audioVideoOutputPath.value = outputPath;
+  workflowOutputPaths.audioVideo.textContent = outputPath;
 }
 
 function setAudioVideoStatus() {
@@ -1959,9 +2764,20 @@ async function chooseAudioForVideo() {
   });
   if (typeof selected === "string") {
     audioVideoAudioPath.value = selected;
-    if (!audioVideoOutputPath.value.trim()) {
-      audioVideoOutputPath.value = defaultAudioVideoOutputPath();
-    }
+    syncAudioVideoOutputPath();
+    setActiveWorkflow("audioVideo");
+    setAudioVideoStatus();
+  }
+}
+
+async function chooseImageForVideo() {
+  const selected = await open({
+    multiple: false,
+    directory: false,
+    filters: [{ name: "Image", extensions: imageExtensions }],
+  });
+  if (typeof selected === "string") {
+    audioVideoImagePath.value = selected;
     setActiveWorkflow("audioVideo");
     setAudioVideoStatus();
   }
@@ -1984,13 +2800,13 @@ function setMergerStatus() {
   setStatus({
     status: "idle",
     phase: "inspect",
-    message: mergeVideoPaths.length >= 2 ? "Ready to merge" : "Select at least two videos",
+    message: mergeMediaPaths.length >= 2 ? "Ready to merge" : "Select at least two media files",
   });
 }
 
 function applyMergeControlState(running = currentStatus.status === "running") {
-  mergerStartButton.disabled = running || mergeVideoPaths.length < 2;
-  mergerClearButton.disabled = running || mergeVideoPaths.length === 0;
+  mergerStartButton.disabled = running || mergeMediaPaths.length < 2;
+  mergerClearButton.disabled = running || mergeMediaPaths.length === 0;
   mergerFileList
     .querySelectorAll<HTMLButtonElement>("button")
     .forEach((button) => {
@@ -2001,27 +2817,27 @@ function applyMergeControlState(running = currentStatus.status === "running") {
       if (button.dataset.direction === "up") {
         button.disabled = button.dataset.index === "0";
       } else if (button.dataset.direction === "down") {
-        button.disabled = Number(button.dataset.index) === mergeVideoPaths.length - 1;
+        button.disabled = Number(button.dataset.index) === mergeMediaPaths.length - 1;
       } else {
         button.disabled = false;
       }
     });
 }
 
-function moveMergeVideo(index: number, direction: -1 | 1) {
+function moveMergeMedia(index: number, direction: -1 | 1) {
   const targetIndex = index + direction;
-  if (targetIndex < 0 || targetIndex >= mergeVideoPaths.length) {
+  if (targetIndex < 0 || targetIndex >= mergeMediaPaths.length) {
     return;
   }
-  const [path] = mergeVideoPaths.splice(index, 1);
-  mergeVideoPaths.splice(targetIndex, 0, path);
+  const [path] = mergeMediaPaths.splice(index, 1);
+  mergeMediaPaths.splice(targetIndex, 0, path);
   renderMergeList();
   setMergerStatus();
 }
 
-function removeMergeVideo(index: number) {
-  mergeVideoPaths.splice(index, 1);
-  if (mergeVideoPaths.length === 0) {
+function removeMergeMedia(index: number) {
+  mergeMediaPaths.splice(index, 1);
+  if (mergeMediaPaths.length === 0) {
     mergerOutputPath.value = "";
   }
   renderMergeList();
@@ -2030,16 +2846,16 @@ function removeMergeVideo(index: number) {
 
 function renderMergeList() {
   mergerFileList.replaceChildren();
-  if (mergeVideoPaths.length === 0) {
+  if (mergeMediaPaths.length === 0) {
     const empty = document.createElement("p");
     empty.className = "empty-note";
-    empty.textContent = "No videos selected.";
+    empty.textContent = "No media selected.";
     mergerFileList.append(empty);
     applyMergeControlState();
     return;
   }
 
-  mergeVideoPaths.forEach((path, index) => {
+  mergeMediaPaths.forEach((path, index) => {
     const row = document.createElement("div");
     row.className = "merge-file-row";
 
@@ -2066,7 +2882,7 @@ function renderMergeList() {
     up.dataset.index = String(index);
     up.disabled = index === 0;
     up.innerHTML = `<i data-lucide="arrow-up"></i>`;
-    up.addEventListener("click", () => moveMergeVideo(index, -1));
+    up.addEventListener("click", () => moveMergeMedia(index, -1));
 
     const down = document.createElement("button");
     down.className = "icon-button";
@@ -2074,16 +2890,16 @@ function renderMergeList() {
     down.title = "Move down";
     down.dataset.direction = "down";
     down.dataset.index = String(index);
-    down.disabled = index === mergeVideoPaths.length - 1;
+    down.disabled = index === mergeMediaPaths.length - 1;
     down.innerHTML = `<i data-lucide="arrow-down"></i>`;
-    down.addEventListener("click", () => moveMergeVideo(index, 1));
+    down.addEventListener("click", () => moveMergeMedia(index, 1));
 
     const remove = document.createElement("button");
     remove.className = "icon-button";
     remove.type = "button";
     remove.title = "Remove";
     remove.innerHTML = `<i data-lucide="trash-2"></i>`;
-    remove.addEventListener("click", () => removeMergeVideo(index));
+    remove.addEventListener("click", () => removeMergeMedia(index));
 
     actions.append(up, down, remove);
     row.append(indexLabel, meta, actions);
@@ -2094,11 +2910,11 @@ function renderMergeList() {
   applyMergeControlState();
 }
 
-async function chooseMergeVideos() {
+async function chooseMergeMedia() {
   const selected = await open({
     multiple: true,
     directory: false,
-    filters: [{ name: "Video", extensions: videoExtensions }],
+    filters: [{ name: "Media", extensions: [...videoExtensions, ...audioExtensions] }],
   });
   const paths = Array.isArray(selected)
     ? selected
@@ -2108,8 +2924,8 @@ async function chooseMergeVideos() {
   if (paths.length === 0) {
     return;
   }
-  const existing = new Set(mergeVideoPaths);
-  mergeVideoPaths = [...mergeVideoPaths, ...paths.filter((path) => !existing.has(path))];
+  const existing = new Set(mergeMediaPaths);
+  mergeMediaPaths = [...mergeMediaPaths, ...paths.filter((path) => !existing.has(path))];
   if (!mergerOutputPath.value.trim()) {
     mergerOutputPath.value = defaultMergeOutputPath();
   }
@@ -2119,9 +2935,15 @@ async function chooseMergeVideos() {
 }
 
 async function chooseMergeOutput() {
+  const extension = mergeOutputExtension();
   const selected = await save({
-    defaultPath: mergerOutputPath.value.trim() || defaultMergeOutputPath() || "merged.mp4",
-    filters: [{ name: "MP4 video", extensions: ["mp4"] }],
+    defaultPath: mergerOutputPath.value.trim() || defaultMergeOutputPath() || `merged.${extension}`,
+    filters: [
+      {
+        name: extension === "m4a" ? "M4A audio" : "MP4 video",
+        extensions: [extension],
+      },
+    ],
   });
   if (selected) {
     mergerOutputPath.value = selected;
@@ -2206,12 +3028,16 @@ processingBrowseButton.addEventListener("click", () =>
 );
 converterBrowseButton.addEventListener("click", () => chooseVideo(converterVideoPath, "converter"));
 audioVideoBrowseButton.addEventListener("click", () => void chooseAudioForVideo());
-audioVideoAudioPath.addEventListener("change", () => {
-  if (!audioVideoOutputPath.value.trim()) {
-    audioVideoOutputPath.value = defaultAudioVideoOutputPath();
-  }
+audioVideoAudioPath.addEventListener("input", () => {
+  syncAudioVideoOutputPath();
   setAudioVideoStatus();
 });
+audioVideoImageBrowseButton.addEventListener("click", () => void chooseImageForVideo());
+audioVideoAudioPath.addEventListener("change", () => {
+  syncAudioVideoOutputPath();
+  setAudioVideoStatus();
+});
+audioVideoImagePath.addEventListener("change", setAudioVideoStatus);
 audioVideoOutputBrowseButton.addEventListener("click", () => void chooseAudioVideoOutput());
 audioVideoOutputPath.addEventListener("input", () => {
   workflowOutputPaths.audioVideo.textContent = audioVideoOutputPath.value.trim();
@@ -2226,9 +3052,9 @@ audioVideoBackgroundButtons.forEach((button) => {
     updateAudioVideoBackground(button.dataset.background ?? "111827"),
   );
 });
-mergerAddButton.addEventListener("click", () => void chooseMergeVideos());
+mergerAddButton.addEventListener("click", () => void chooseMergeMedia());
 mergerClearButton.addEventListener("click", () => {
-  mergeVideoPaths = [];
+  mergeMediaPaths = [];
   mergerOutputPath.value = "";
   workflowOutputPaths.merger.textContent = "";
   renderMergeList();
@@ -2260,11 +3086,7 @@ grabOutputDir.addEventListener("change", () => {
 materialRefreshButton.addEventListener("click", () => void loadMaterialGallery());
 grabContentRefreshButton.addEventListener("click", () => {
   disarmGrabDeleteButton();
-  void loadGrabContentFiles(grabContentFileSelect.value);
-});
-grabContentFileSelect.addEventListener("change", () => {
-  disarmGrabDeleteButton();
-  void previewGrabContentFile(grabContentFileSelect.value);
+  void loadGrabContentFiles(grabPreviewPath);
 });
 grabContentDeleteButton.addEventListener("click", () => void deleteGrabContentFile());
 grabContentCopyButton.addEventListener("click", () => void copyGrabContent());
@@ -2273,10 +3095,58 @@ grabUrl.addEventListener("input", () => {
   setStatus({
     status: "idle",
     phase: "fetch",
-    message: grabUrl.value.trim() ? "Start to load options" : "Paste a URL to begin",
+    message: grabUrl.value.trim() ? "Scan to load options" : "Paste a URL to begin",
   });
 });
-grabQuality.addEventListener("change", () => applyGrabControlState());
+grabUrl.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !grabberStartButton.disabled) {
+    void inspectGrabUrl();
+  }
+});
+grabVideoSwitch.addEventListener("click", () => {
+  grabSel.video = !grabSel.video;
+  renderGrabSelection();
+});
+grabAudioSwitch.addEventListener("click", () => {
+  grabSel.audio = !grabSel.audio;
+  renderGrabSelection();
+});
+grabSubsSwitch.addEventListener("click", () => {
+  grabSel.subs = !grabSel.subs;
+  renderGrabSelection();
+});
+grabChaptersSwitch.addEventListener("click", () => {
+  grabSel.chapters = !grabSel.chapters;
+  renderGrabSelection();
+});
+grabChaptersCopyButton.addEventListener("click", () => void copyGrabChapters());
+grabMuxMuxedButton.addEventListener("click", () => {
+  grabSel.mux = "muxed";
+  renderGrabSelection();
+});
+grabMuxSeparateButton.addEventListener("click", () => {
+  grabSel.mux = "separate";
+  renderGrabSelection();
+});
+grabMatchAudioButton.addEventListener("click", () => {
+  // Copy the audio selection across, preferring a manual track per language.
+  const tracks = grabMetadata?.subtitles ?? [];
+  grabSel.subSel = grabSel.audioSel
+    .map((id) => {
+      const language = id.split("-")[0];
+      const forLanguage = tracks.filter(
+        (track) => track.language === id || track.language.split("-")[0] === language,
+      );
+      return (forLanguage.find((track) => !track.auto) ?? forLanguage[0])?.id;
+    })
+    .filter((id): id is string => id !== undefined);
+  grabSel.subs = true;
+  renderGrabSelection();
+});
+grabOutputSettingsButton.addEventListener("click", () => {
+  grabOutputSettings.hidden = !grabOutputSettings.hidden;
+});
+grabDownloadButton.addEventListener("click", () => void downloadGrabSelection());
 
 slowSpeed.addEventListener("input", () => updateSpeed(slowSpeed.value));
 slowSpeedRange.addEventListener("input", () => updateSpeed(slowSpeedRange.value));
@@ -2343,6 +3213,7 @@ converterStartButton.addEventListener("click", () =>
 audioVideoStartButton.addEventListener("click", () =>
   startRun("audioVideo", "start_audio_video", {
     audioPath: audioVideoAudioPath.value.trim(),
+    imagePath: audioVideoImagePath.value.trim(),
     outputPath: audioVideoOutputPath.value.trim(),
     resolution: audioVideoResolution,
     background: audioVideoBackground,
@@ -2351,7 +3222,7 @@ audioVideoStartButton.addEventListener("click", () =>
 
 mergerStartButton.addEventListener("click", () =>
   startRun("merger", "start_merge", {
-    videoPaths: mergeVideoPaths,
+    mediaPaths: mergeMediaPaths,
     outputPath: mergerOutputPath.value.trim(),
   }),
 );
@@ -2452,6 +3323,14 @@ transcribeModelDeleteButton.addEventListener("click", async () => {
 });
 
 async function inspectGrabUrl() {
+  if (downloaderActionRequired()) {
+    setStatus({
+      status: "error",
+      phase: "error",
+      message: downloaderStatus?.message ?? "Update yt-dlp before scanning this URL.",
+    });
+    return;
+  }
   setActiveWorkflow("grabber");
   runningWorkflow = "grabber";
   clearLog();
@@ -2473,7 +3352,7 @@ async function inspectGrabUrl() {
     setStatus({
       status: "idle",
       phase: "download",
-      message: "Choose quality and subtitle tracks",
+      message: "Choose the tracks you want",
     });
   } catch (error) {
     setStatus({
@@ -2483,43 +3362,50 @@ async function inspectGrabUrl() {
     });
   } finally {
     applyGrabControlState();
+    void loadDownloaderStatus();
   }
 }
 
 async function downloadGrabSelection() {
+  if (!canStartGrab()) {
+    return;
+  }
   setActiveWorkflow("grabber");
   runningWorkflow = "grabber";
   clearLog();
   try {
-    const subtitleLanguages = selectedSubtitleLanguages();
-    const downloadVideo = shouldDownloadVideo();
-    const downloadSubtitles = shouldDownloadSrt();
-    const downloadJson3Subtitles = shouldDownloadJson3();
-    const phase = downloadVideo ? "download" : "subtitles";
-    const message = downloadVideo
-      ? downloadSubtitles || downloadJson3Subtitles
-        ? "Downloading video and subtitles"
-        : "Downloading selected material"
-      : downloadSubtitles && downloadJson3Subtitles
-        ? "Saving SRT and JSON3 subtitles"
-        : downloadJson3Subtitles
-          ? "Saving JSON3 subtitles"
-          : "Saving SRT subtitles";
+    const wantsVideo = grabSel.video;
+    const wantsAudio = grabSel.audio && grabSel.audioSel.length > 0;
+    const subTracks = grabSel.subs
+      ? grabSel.subSel
+          .map((id) => grabSubtitleTrackFor(id))
+          .filter((track): track is GrabSubtitleTrack => track !== undefined)
+      : [];
     setStatus({
       status: "running",
-      phase,
-      message,
+      phase: wantsVideo || wantsAudio ? "download" : "subtitles",
+      message: wantsVideo
+        ? "Downloading video"
+        : wantsAudio
+          ? "Downloading audio"
+          : "Saving subtitles",
     });
     await waitForVisibleUpdate();
     const outputDir = await invoke<string>("start_grab", {
       options: {
         url: grabUrl.value.trim(),
         outputDir: grabOutputDir.value.trim(),
-        downloadVideo,
-        downloadSubtitles,
-        downloadJson3Subtitles,
-        quality: grabQuality.value,
-        subtitleLanguages: subtitleLanguages.join(","),
+        video: wantsVideo,
+        quality: grabSel.quality === null ? "best" : String(grabSel.quality),
+        audio: wantsAudio,
+        audioLangs: wantsAudio ? grabSel.audioSel : [],
+        mux: grabSel.mux === "separate" ? "separate" : "single",
+        subs: subTracks.length > 0,
+        manualLangs: subTracks.filter((track) => !track.auto).map((track) => track.language),
+        autoLangs: subTracks.filter((track) => track.auto).map((track) => track.language),
+        subtitleFormats: grabSel.fmtSel,
+        chapters: grabSel.chapters && (grabMetadata?.chapters.length ?? 0) > 0,
+        chapterFormats: grabSel.chapFmtSel,
       },
     });
     workflowOutputPaths.grabber.textContent = outputDir;
@@ -2532,26 +3418,28 @@ async function downloadGrabSelection() {
   }
 }
 
-grabberStartButton.addEventListener("click", async () => {
-  if (grabMetadata) {
-    await downloadGrabSelection();
-  } else {
-    await inspectGrabUrl();
-  }
-});
-grabDownloadVideo.addEventListener("change", () => applyGrabControlState());
-grabSrt.addEventListener("change", () => applyGrabControlState());
-grabJson3.addEventListener("change", () => applyGrabControlState());
+grabberStartButton.addEventListener("click", () => void inspectGrabUrl());
+grabDownloaderAction.addEventListener("click", () =>
+  void startRun("grabber", "start_downloader_install", {
+    outputDir: grabOutputDir.value.trim(),
+  }),
+);
 
 // ---------- Subtitle player ----------
 
 type SubtitleFileEntry = { path: string; fileName: string };
 type SubtitleCue = { start: number; end: number; text: string };
+type CueTimingAdjustment = { startDelta: number; endDelta: number };
+type CueJumpInfo = { after: number | null };
+
+const JUMP_GAP_SECONDS = 0.35;
 
 let playerCues: SubtitleCue[] = [];
-let playerCueButtons: HTMLButtonElement[] = [];
+let playerCueItems: HTMLElement[] = [];
 let playerActiveCue = -1;
-let playerOffset = 0.5;
+let playerEditingCue = -1;
+let playerReplayUntil: number | null = null;
+let playerCueAdjustments = new Map<string, CueTimingAdjustment>();
 let playerDroppedCues = 0;
 let playerClampedCues = 0;
 let playerSubtitleFile = "";
@@ -2587,7 +3475,7 @@ function toggleCueIgnore(index: number) {
   } else {
     playerIgnoredKeys.add(key);
   }
-  playerCueButtons[index]?.classList.toggle("ignored", playerIgnoredKeys.has(key));
+  playerCueItems[index]?.classList.toggle("ignored", playerIgnoredKeys.has(key));
   updatePlayerSummary();
   void persistCueIgnores();
 }
@@ -2697,23 +3585,108 @@ function formatCueTime(seconds: number): string {
     : `${minutes}:${String(secs).padStart(2, "0")}`;
 }
 
+function cueAdjustment(cue: SubtitleCue): CueTimingAdjustment {
+  return playerCueAdjustments.get(cueKey(cue)) ?? { startDelta: 0, endDelta: 0 };
+}
+
+function adjustedCueStart(cue: SubtitleCue): number {
+  return Math.max(0, cue.start + cueAdjustment(cue).startDelta);
+}
+
+function adjustedCueEnd(cue: SubtitleCue): number {
+  return Math.max(adjustedCueStart(cue), cue.end + cueAdjustment(cue).endDelta);
+}
+
+function cuePlaybackStart(cue: SubtitleCue): number {
+  return adjustedCueStart(cue);
+}
+
+function cuePlaybackEnd(cue: SubtitleCue): number {
+  return adjustedCueEnd(cue);
+}
+
+function formatSignedSeconds(value: number): string {
+  return (value >= 0 ? "+" : "") + value.toFixed(1) + "s";
+}
+
+function formatGapSeconds(value: number): string {
+  return value < 10 ? value.toFixed(1) + "s" : formatCueTime(value);
+}
+
+function cueAdjustmentStorageKey(path = playerSubtitleFile): string {
+  return "dialogue-cut:cue-adjustments:" + path;
+}
+
+function loadCueAdjustments(path: string): Map<string, CueTimingAdjustment> {
+  try {
+    const raw = window.localStorage.getItem(cueAdjustmentStorageKey(path));
+    if (!raw) {
+      return new Map();
+    }
+    const parsed = JSON.parse(raw) as Record<string, CueTimingAdjustment>;
+    return new Map(
+      Object.entries(parsed).filter(
+        ([, value]) =>
+          typeof value?.startDelta === "number" && typeof value?.endDelta === "number",
+      ),
+    );
+  } catch {
+    return new Map();
+  }
+}
+
+function persistCueAdjustments() {
+  if (!playerSubtitleFile) {
+    return;
+  }
+  const entries = [...playerCueAdjustments.entries()].filter(
+    ([, value]) => value.startDelta !== 0 || value.endDelta !== 0,
+  );
+  if (entries.length === 0) {
+    window.localStorage.removeItem(cueAdjustmentStorageKey());
+    return;
+  }
+  window.localStorage.setItem(cueAdjustmentStorageKey(), JSON.stringify(Object.fromEntries(entries)));
+}
+
+function cueJumpInfos(): CueJumpInfo[] {
+  const infos = playerCues.map(() => ({ after: null }) as CueJumpInfo);
+  let previousIndex: number | null = null;
+
+  playerCues.forEach((cue, index) => {
+    if (isCueIgnored(cue)) {
+      return;
+    }
+    if (previousIndex !== null) {
+      const previous = playerCues[previousIndex];
+      const gap = cuePlaybackStart(cue) - cuePlaybackEnd(previous);
+      if (gap > JUMP_GAP_SECONDS) {
+        infos[previousIndex].after = gap;
+      }
+    }
+    previousIndex = index;
+  });
+
+  return infos;
+}
+
+function cueJumpCount(): number {
+  return cueJumpInfos().filter((info) => info.after !== null).length;
+}
+
 function cueIndexAt(time: number): number {
-  let low = 0;
-  let high = playerCues.length - 1;
   let candidate = -1;
-  while (low <= high) {
-    const mid = (low + high) >> 1;
-    if (playerCues[mid].start <= time) {
-      candidate = mid;
-      low = mid + 1;
-    } else {
-      high = mid - 1;
+  for (let index = 0; index < playerCues.length; index += 1) {
+    const cue = playerCues[index];
+    const start = cuePlaybackStart(cue);
+    if (start > time + 0.05) {
+      break;
+    }
+    if (time <= cuePlaybackEnd(cue) + 0.05) {
+      candidate = index;
     }
   }
-  if (candidate >= 0 && time <= playerCues[candidate].end + 0.05) {
-    return candidate;
-  }
-  return -1;
+  return candidate;
 }
 
 function seekToCue(index: number) {
@@ -2721,7 +3694,7 @@ function seekToCue(index: number) {
   if (!cue) {
     return;
   }
-  playerVideo.currentTime = Math.max(0, cue.start - playerOffset);
+  playerVideo.currentTime = cuePlaybackStart(cue);
   void playerVideo.play();
 }
 
@@ -2729,15 +3702,15 @@ function setActivePlayerCue(index: number) {
   if (index === playerActiveCue) {
     return;
   }
-  playerCueButtons[playerActiveCue]?.classList.remove("active");
+  playerCueItems[playerActiveCue]?.classList.remove("active");
   playerActiveCue = index;
-  const button = playerCueButtons[index];
-  if (button) {
-    button.classList.add("active");
+  const item = playerCueItems[index];
+  if (item) {
+    item.classList.add("active");
     if (playerFollow.checked) {
       // Keep the active cue pinned to the top of the scroll window so the
       // upcoming dialogue is always visible below it.
-      playerCueList.scrollTo({ top: button.offsetTop, behavior: "smooth" });
+      playerCueList.scrollTo({ top: item.offsetTop, behavior: "smooth" });
     }
   }
 }
@@ -2749,9 +3722,8 @@ type ExportPlan = {
   totalSeconds: number;
 };
 
-// Mirrors dialogue-only playback: each kept cue plays from (start - offset)
-// to its end, and gaps short enough to play through are included. The same
-// plan drives the runtime estimate and the exported cut.
+// Mirrors dialogue-only playback: each kept cue plays through its adjusted
+// per-segment window. The same plan drives the runtime estimate and export.
 function buildExportPlan(): ExportPlan {
   const ranges: { start: number; end: number }[] = [];
   const cues: SubtitleCue[] = [];
@@ -2760,20 +3732,23 @@ function buildExportPlan(): ExportPlan {
     if (isCueIgnored(cue)) {
       continue;
     }
-    const start = Math.max(0, cue.start - playerOffset);
+    const start = cuePlaybackStart(cue);
+    const end = cuePlaybackEnd(cue);
+    const textStart = adjustedCueStart(cue);
+    const textEnd = adjustedCueEnd(cue);
     let range = ranges[ranges.length - 1];
-    if (range && start <= range.end + 0.35) {
-      range.end = Math.max(range.end, cue.end);
+    if (range && start <= range.end + JUMP_GAP_SECONDS) {
+      range.end = Math.max(range.end, end);
     } else {
       if (range) {
         elapsedBefore += range.end - range.start;
       }
-      range = { start, end: cue.end };
+      range = { start, end };
       ranges.push(range);
     }
     cues.push({
-      start: elapsedBefore + (cue.start - range.start),
-      end: elapsedBefore + (cue.end - range.start),
+      start: elapsedBefore + Math.max(0, textStart - range.start),
+      end: elapsedBefore + Math.max(0, textEnd - range.start),
       text: cue.text,
     });
   }
@@ -2812,7 +3787,9 @@ function updatePlayerSummary() {
   const dialogue = dialogueOnlyDuration();
   let summary = `${playerCues.length} cues`;
   const ignoredCount = playerCues.filter(isCueIgnored).length;
+  const jumpCount = cueJumpCount();
   const cleanupParts = [
+    jumpCount > 0 ? `${jumpCount} jumps` : "",
     ignoredCount > 0 ? `${ignoredCount} ignored` : "",
     playerDroppedCues > 0 ? `${playerDroppedCues} removed` : "",
     playerClampedCues > 0 ? `${playerClampedCues} shortened` : "",
@@ -2830,7 +3807,7 @@ function updatePlayerSummary() {
 
 function renderPlayerCues() {
   playerCueList.replaceChildren();
-  playerCueButtons = [];
+  playerCueItems = [];
   playerActiveCue = -1;
   updatePlayerSummary();
   if (playerCues.length === 0) {
@@ -2840,31 +3817,83 @@ function renderPlayerCues() {
     playerCueList.append(empty);
     return;
   }
+  const jumpInfos = cueJumpInfos();
   playerCues.forEach((cue, index) => {
-    const button = document.createElement("button");
-    button.className = "cue-row";
-    button.classList.toggle("ignored", isCueIgnored(cue));
-    button.type = "button";
-    button.addEventListener("click", () => seekToCue(index));
+    const jumpInfo = jumpInfos[index] ?? { after: null };
+    const adjustment = cueAdjustment(cue);
+    const isAdjusted = adjustment.startDelta !== 0 || adjustment.endDelta !== 0;
+    const item = document.createElement("div");
+    item.className = "cue-item";
+    item.classList.toggle("editing", playerEditingCue === index);
+    item.classList.toggle("ignored", isCueIgnored(cue));
+    item.classList.toggle("adjusted", isAdjusted);
+    item.classList.toggle("jump-after", jumpInfo.after !== null);
+
+    const row = document.createElement("div");
+    row.className = "cue-row";
+
+    const seekButton = document.createElement("button");
+    seekButton.className = "cue-seek";
+    seekButton.type = "button";
+    seekButton.addEventListener("click", () => seekToCue(index));
 
     const time = document.createElement("span");
     time.className = "cue-time";
-    time.textContent = `${formatCueTime(cue.start)} → ${formatCueTime(cue.end)}`;
+    time.textContent = `${formatCueTime(adjustedCueStart(cue))} → ${formatCueTime(adjustedCueEnd(cue))}`;
     const text = document.createElement("span");
     text.className = "cue-text";
     text.textContent = cue.text;
-    const ignore = document.createElement("span");
+
+    const jumpMarkers = document.createElement("span");
+    jumpMarkers.className = "cue-jump-markers";
+    if (jumpInfo.after !== null) {
+      const jumpOut = document.createElement("span");
+      jumpOut.className = "cue-jump-badge out";
+      jumpOut.textContent = `Jump out · ${formatGapSeconds(jumpInfo.after)}`;
+      jumpMarkers.append(jumpOut);
+    }
+
+    const actions = document.createElement("span");
+    actions.className = "cue-actions";
+    const adjust = document.createElement("button");
+    adjust.className = "cue-adjust";
+    adjust.classList.toggle("has-adjustment", isAdjusted);
+    adjust.type = "button";
+    adjust.textContent = playerEditingCue === index ? "Done" : isAdjusted ? "Adjusted" : "Adjust";
+    adjust.addEventListener("click", () => {
+      if (playerEditingCue === index) {
+        playerEditingCue = -1;
+        playerReplayUntil = null;
+        renderPlayerCues();
+        return;
+      }
+      playerEditingCue = index;
+      renderPlayerCues();
+      previewCueSegment(index);
+    });
+    const ignore = document.createElement("button");
     ignore.className = "cue-ignore";
-    ignore.textContent = "✕";
+    ignore.type = "button";
+    ignore.textContent = "×";
     ignore.title = "Ignore this segment";
-    ignore.addEventListener("click", (event) => {
-      event.stopPropagation();
+    ignore.addEventListener("click", () => {
       toggleCueIgnore(index);
     });
+    actions.append(adjust, ignore);
 
-    button.append(time, text, ignore);
-    playerCueList.append(button);
-    playerCueButtons.push(button);
+    seekButton.append(time, text);
+    if (jumpMarkers.childElementCount > 0) {
+      seekButton.append(jumpMarkers);
+    }
+    row.append(seekButton, actions);
+    item.append(row);
+
+    if (playerEditingCue === index) {
+      item.append(renderCueAdjustmentPanel(cue, index));
+    }
+
+    playerCueList.append(item);
+    playerCueItems.push(item);
   });
 }
 
@@ -2876,11 +3905,17 @@ async function loadPlayerSubtitleFile(path: string) {
     });
     playerSubtitleFile = path;
     playerIgnoredKeys = new Set(ignoredKeys);
+    playerCueAdjustments = loadCueAdjustments(path);
+    playerEditingCue = -1;
+    playerReplayUntil = null;
     playerCues = cleanCues(parseSubtitles(content));
     renderPlayerCues();
   } catch (error) {
     playerSubtitleFile = "";
     playerIgnoredKeys = new Set();
+    playerCueAdjustments = new Map();
+    playerEditingCue = -1;
+    playerReplayUntil = null;
     playerCues = [];
     renderPlayerCues();
     playerCueCount.textContent = "Could not load subtitles";
@@ -2953,23 +3988,146 @@ async function choosePlayerSubtitle() {
   }
 }
 
-function updatePlayerOffset(value: string) {
-  playerOffset = Math.min(5, Math.max(0, Number(value) || 0));
-  playerOffsetInput.value = playerOffset.toFixed(1);
-  offsetPresetButtons.forEach((button) => {
-    button.classList.toggle("active", Number(button.dataset.offset) === playerOffset);
+function setCueTimingAdjustment(index: number, patch: Partial<CueTimingAdjustment>, replay = true) {
+  const cue = playerCues[index];
+  if (!cue) {
+    return;
+  }
+  const current = cueAdjustment(cue);
+  const next = {
+    startDelta: Math.min(5, Math.max(-5, patch.startDelta ?? current.startDelta)),
+    endDelta: Math.min(5, Math.max(-5, patch.endDelta ?? current.endDelta)),
+  };
+  const key = cueKey(cue);
+  if (next.startDelta === 0 && next.endDelta === 0) {
+    playerCueAdjustments.delete(key);
+  } else {
+    playerCueAdjustments.set(key, next);
+  }
+  persistCueAdjustments();
+  renderPlayerCues();
+  if (replay) {
+    previewCueSegment(index);
+  }
+}
+
+function nudgeCueTiming(index: number, field: keyof CueTimingAdjustment, delta: number) {
+  const cue = playerCues[index];
+  if (!cue) {
+    return;
+  }
+  const current = cueAdjustment(cue);
+  setCueTimingAdjustment(index, { [field]: Number((current[field] + delta).toFixed(1)) });
+}
+
+function shiftCueTiming(index: number, delta: number) {
+  const cue = playerCues[index];
+  if (!cue) {
+    return;
+  }
+  const current = cueAdjustment(cue);
+  setCueTimingAdjustment(index, {
+    startDelta: Number((current.startDelta + delta).toFixed(1)),
+    endDelta: Number((current.endDelta + delta).toFixed(1)),
   });
-  updatePlayerSummary();
+}
+
+function resetCueTiming(index: number) {
+  setCueTimingAdjustment(index, { startDelta: 0, endDelta: 0 });
+}
+
+function previewCueSegment(index: number) {
+  const cue = playerCues[index];
+  if (!cue) {
+    return;
+  }
+  playerReplayUntil = cuePlaybackEnd(cue);
+  seekToCue(index);
+}
+
+function renderCueAdjustmentPanel(cue: SubtitleCue, index: number): HTMLElement {
+  const adjustment = cueAdjustment(cue);
+  const panel = document.createElement("div");
+  panel.className = "cue-adjust-panel";
+
+  const makeGroup = (
+    label: string,
+    value: string,
+    earlier: () => void,
+    later: () => void,
+  ) => {
+    const group = document.createElement("span");
+    group.className = "cue-adjust-group";
+
+    const name = document.createElement("span");
+    name.className = "cue-adjust-label";
+    name.textContent = label;
+
+    const earlierButton = document.createElement("button");
+    earlierButton.type = "button";
+    earlierButton.textContent = "Earlier";
+    earlierButton.addEventListener("click", earlier);
+
+    const laterButton = document.createElement("button");
+    laterButton.type = "button";
+    laterButton.textContent = "Later";
+    laterButton.addEventListener("click", later);
+
+    const current = document.createElement("span");
+    current.className = "cue-adjust-value";
+    current.textContent = value;
+
+    group.append(name, earlierButton, laterButton, current);
+    return group;
+  };
+
+  const startGroup = makeGroup(
+    "Start",
+    formatSignedSeconds(adjustment.startDelta),
+    () => nudgeCueTiming(index, "startDelta", -0.1),
+    () => nudgeCueTiming(index, "startDelta", 0.1),
+  );
+  const endGroup = makeGroup(
+    "End",
+    formatSignedSeconds(adjustment.endDelta),
+    () => nudgeCueTiming(index, "endDelta", -0.1),
+    () => nudgeCueTiming(index, "endDelta", 0.1),
+  );
+  const shiftGroup = makeGroup(
+    "Whole segment",
+    "0.1s",
+    () => shiftCueTiming(index, -0.1),
+    () => shiftCueTiming(index, 0.1),
+  );
+
+  const replay = document.createElement("button");
+  replay.className = "cue-adjust-command";
+  replay.type = "button";
+  replay.textContent = "Replay";
+  replay.addEventListener("click", () => previewCueSegment(index));
+
+  const reset = document.createElement("button");
+  reset.className = "cue-adjust-command";
+  reset.type = "button";
+  reset.textContent = "Reset";
+  reset.addEventListener("click", () => resetCueTiming(index));
+
+  panel.append(startGroup, endGroup, shiftGroup, replay, reset);
+  return panel;
 }
 
 function stepPlayerCue(direction: -1 | 1) {
   if (playerCues.length === 0) {
     return;
   }
+  if (playerEditingCue >= 0) {
+    previewCueSegment(playerEditingCue);
+    return;
+  }
   const time = playerVideo.currentTime;
   let target: number;
   if (direction === 1) {
-    target = playerCues.findIndex((cue) => cue.start > time + 0.05 && !isCueIgnored(cue));
+    target = playerCues.findIndex((cue) => cuePlaybackStart(cue) > time + 0.05 && !isCueIgnored(cue));
     if (target === -1) {
       return;
     }
@@ -2979,7 +4137,7 @@ function stepPlayerCue(direction: -1 | 1) {
     target = playerCues.length - 1;
     while (
       target >= 0 &&
-      (playerCues[target].start >= time - 1 || isCueIgnored(playerCues[target]))
+      (cuePlaybackStart(playerCues[target]) >= time - 1 || isCueIgnored(playerCues[target]))
     ) {
       target -= 1;
     }
@@ -3014,24 +4172,25 @@ playerSubtitle.addEventListener("change", () => {
     void loadPlayerSubtitleFile(playerSubtitle.value);
   }
 });
-playerOffsetInput.addEventListener("input", () => updatePlayerOffset(playerOffsetInput.value));
-offsetPresetButtons.forEach((button) => {
-  button.addEventListener("click", () => updatePlayerOffset(button.dataset.offset ?? "0.5"));
-});
 playerPrevCue.addEventListener("click", () => stepPlayerCue(-1));
 playerNextCue.addEventListener("click", () => stepPlayerCue(1));
 playerReplayCue.addEventListener("click", () => {
-  const index = playerActiveCue >= 0 ? playerActiveCue : cueIndexAt(playerVideo.currentTime);
+  const index =
+    playerEditingCue >= 0
+      ? playerEditingCue
+      : playerActiveCue >= 0
+        ? playerActiveCue
+        : cueIndexAt(playerVideo.currentTime);
   if (index >= 0) {
-    seekToCue(index);
+    previewCueSegment(index);
   }
 });
-// In dialogue-only mode, gaps between cues are skipped: once playback leaves
-// a cue and the next one is still ahead, jump to it (minus the jump offset).
-// The 0.35s margin keeps tiny gaps playing through and prevents re-jumping
-// inside the offset lead-in we just landed on.
+// In dialogue-only mode, gaps between adjusted cue windows are skipped. The
+// jump-gap margin keeps tiny gaps playing through and prevents re-jumping inside
+// the adjusted cue window we just landed on.
 function skipGapIfNeeded(time: number) {
   if (
+    playerEditingCue >= 0 ||
     !playerDialogueOnly.checked ||
     playerVideo.paused ||
     playerVideo.seeking ||
@@ -3043,19 +4202,53 @@ function skipGapIfNeeded(time: number) {
   if (insideIndex !== -1 && !isCueIgnored(playerCues[insideIndex])) {
     return;
   }
-  const next = playerCues.find((cue) => cue.start > time && !isCueIgnored(cue));
+  const next = playerCues.find((cue) => cuePlaybackStart(cue) > time && !isCueIgnored(cue));
   if (!next) {
     return;
   }
-  const target = next.start - playerOffset;
-  if (target > time + 0.35) {
+  const target = cuePlaybackStart(next);
+  if (target > time + JUMP_GAP_SECONDS) {
     playerVideo.currentTime = target;
   }
 }
 
+function keepEditedCueLocked(time: number): boolean {
+  if (playerEditingCue < 0) {
+    return false;
+  }
+  const cue = playerCues[playerEditingCue];
+  if (!cue) {
+    playerEditingCue = -1;
+    playerReplayUntil = null;
+    return false;
+  }
+  setActivePlayerCue(playerEditingCue);
+
+  const start = cuePlaybackStart(cue);
+  const end = cuePlaybackEnd(cue);
+  if (time < start - 0.05 || time > end + 0.05) {
+    playerReplayUntil = end;
+    playerVideo.currentTime = start;
+    return true;
+  }
+  if (!playerVideo.paused && time >= end - 0.03) {
+    playerVideo.pause();
+    playerReplayUntil = null;
+  }
+  return true;
+}
+
 playerVideo.addEventListener("timeupdate", () => {
   const time = playerVideo.currentTime;
+  if (keepEditedCueLocked(time)) {
+    return;
+  }
   setActivePlayerCue(cueIndexAt(time));
+  if (playerReplayUntil !== null && time >= playerReplayUntil - 0.03) {
+    playerVideo.pause();
+    playerReplayUntil = null;
+    return;
+  }
   skipGapIfNeeded(time);
 });
 playerVideo.addEventListener("loadedmetadata", updatePlayerSummary);
@@ -3108,8 +4301,8 @@ updateSpeed(slowSpeed.value);
 updateConvertMode(convertMode);
 updateAudioVideoResolution(audioVideoResolution);
 updateAudioVideoBackground(audioVideoBackground);
-updatePlayerOffset(playerOffsetInput.value);
 void loadWhisperModels();
+void loadDownloaderStatus();
 invoke<string>("get_default_grab_output_dir")
   .then((path) => {
     if (!grabOutputDir.value.trim()) {

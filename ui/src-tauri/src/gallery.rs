@@ -46,6 +46,21 @@ fn modified_seconds(path: &Path) -> Option<u64> {
         .map(|duration| duration.as_secs())
 }
 
+fn collect_video_files(directory: &Path, depth: u8, files: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if path.is_file() && is_supported_video(&path) {
+            files.push(path);
+        } else if depth < 1 && path.is_dir() {
+            collect_video_files(&path, depth + 1, files);
+        }
+    }
+}
+
 pub(crate) fn list_material_videos_inner(
     app: &AppHandle,
     state: &ConversionState,
@@ -54,12 +69,8 @@ pub(crate) fn list_material_videos_inner(
     fs::create_dir_all(directory)
         .map_err(|error| format!("Could not create {}: {error}", directory.display()))?;
 
-    let mut files = fs::read_dir(directory)
-        .map_err(|error| format!("Could not read {}: {error}", directory.display()))?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.is_file() && is_supported_video(path))
-        .collect::<Vec<_>>();
+    let mut files = Vec::new();
+    collect_video_files(directory, 0, &mut files);
     files.sort_by_key(|path| std::cmp::Reverse(modified_seconds(path).unwrap_or(0)));
     files.truncate(48);
 

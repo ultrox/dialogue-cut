@@ -202,7 +202,9 @@ fn handle_connection(stream: TcpStream) -> std::io::Result<()> {
     let total = file.metadata()?.len();
     let content_type = content_type(&path);
 
-    let (start, end, status) = match range_header.as_deref().and_then(|raw| parse_range(raw, total))
+    let (start, end, status) = match range_header
+        .as_deref()
+        .and_then(|raw| parse_range(raw, total))
     {
         Some((start, end)) => (start, end, "206 Partial Content"),
         None => (0, total.saturating_sub(1), "200 OK"),
